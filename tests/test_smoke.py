@@ -76,6 +76,71 @@ def test_captions_file_keeps_last_n_lines(tmp_path=None):
             os.chdir(cwd)
 
 
+def _controller():
+    import argparse
+
+    args = argparse.Namespace(
+        lang="fi", model="small", translate=False, partials=True,
+        langs=["fi", "ru", "ja", "es", "pt", "auto"],
+        model_choices=["tiny", "base", "small"],
+        txt="captions.txt", txt_lines=2)
+    bus = livecap.Bus(args)
+    bus.publish = lambda msg: bus.history.append(msg)   # no websocket in tests
+    return livecap.Controller(args, bus), args
+
+
+def test_language_codes_validated():
+    for good in ("fi", "ru", "ja", "es", "pt", "en", "auto"):
+        assert livecap.valid_language(good), good
+    for bad in ("klingon", "", None, "e", 42):
+        assert not livecap.valid_language(bad), bad
+
+
+def test_controller_switches_language():
+    ctl, args = _controller()
+    ctl.handle('{"cmd":"set_lang","value":"ja"}')
+    assert args.lang == "ja"
+    ctl.handle('{"cmd":"set_lang","value":"ru"}')
+    assert args.lang == "ru"
+
+
+def test_controller_rejects_bad_language_and_bad_json():
+    ctl, args = _controller()
+    ctl.handle('{"cmd":"set_lang","value":"klingon"}')
+    assert args.lang == "fi"
+    ctl.handle("not json at all")
+    ctl.handle('{"cmd":"nonsense"}')
+    assert args.lang == "fi"
+
+
+def test_model_change_is_queued_for_the_worker_thread():
+    """Model loading must not happen on the websocket thread."""
+    ctl, args = _controller()
+    ctl.handle('{"cmd":"set_model","value":"base"}')
+    assert ctl.cmds.get_nowait() == ("model", "base")
+    assert args.model == "small", "model must not change until the worker reloads it"
+
+    ctl.handle('{"cmd":"set_model","value":"small"}')   # already current
+    assert ctl.cmds.empty()
+
+
+def test_toggles():
+    ctl, args = _controller()
+    ctl.handle('{"cmd":"set_translate","value":true}')
+    assert args.translate is True
+    ctl.handle('{"cmd":"set_partials","value":false}')
+    assert args.partials is False
+
+
+def test_status_payload_is_complete():
+    ctl, _ = _controller()
+    s = ctl.status()
+    for key in ("type", "lang", "model", "loading", "translate",
+                "partials", "langs", "models"):
+        assert key in s, key
+    assert s["type"] == "status"
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

@@ -26,9 +26,18 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import warnings
+
 import numpy as np
 import soundcard as sc
 from scipy.signal import resample_poly
+
+# Loopback capture reports gaps whenever the device goes idle. Harmless for
+# speech recognition, but it otherwise floods the console during quiet moments.
+try:
+    warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
+except AttributeError:
+    warnings.filterwarnings("ignore", message="data discontinuity in recording")
 
 HERE = Path(__file__).resolve().parent
 TARGET_SR = 16000
@@ -48,6 +57,15 @@ HALLUCINATIONS = [
     r"^\W*$",
 ]
 HALLUCINATION_RE = [re.compile(p, re.I) for p in HALLUCINATIONS]
+
+
+# Captions are frequently non-Latin (ru, ja, ...). Windows otherwise encodes
+# stdout with the console codepage, which mangles them once output is redirected.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 
 def log(*a):
@@ -225,19 +243,23 @@ class Bus:
             log("file write failed:", e)
 
 
-async def ws_server(bus, args, stop):
+async def ws_server(bus, args, ctl, stop):
     import websockets
 
     async def handler(ws):
         bus.clients.add(ws)
-        log("overlay connected (%d client(s))" % len(bus.clients))
+        log("client connected (%d total)" % len(bus.clients))
         try:
+            await ws.send(json.dumps(ctl.status(), ensure_ascii=False))
             for m in list(bus.history)[-4:]:
                 await ws.send(json.dumps(m, ensure_ascii=False))
-            await ws.wait_closed()
+            async for raw in ws:
+                ctl.handle(raw)
+        except Exception:
+            pass
         finally:
             bus.clients.discard(ws)
-            log("overlay disconnected (%d client(s))" % len(bus.clients))
+            log("client disconnected (%d total)" % len(bus.clients))
 
     async with websockets.serve(handler, "127.0.0.1", args.ws_port, ping_interval=20):
         log("websocket  ws://127.0.0.1:%d" % args.ws_port)
@@ -259,10 +281,91 @@ def http_server(args):
         url += "&tr=1"
     log("OBS Browser Source URL (copy this):")
     log("  " + url)
+    log("Control panel (open in any browser):")
+    log("  http://127.0.0.1:%d/control.html?ws=%d" % (args.http_port, args.ws_port))
     return srv
 
 
 # ----------------------------------------------------------- transcription --
+
+class Controller:
+    """Applies live language/model changes coming from the control panel."""
+
+    def __init__(self, args, bus):
+        self.args = args
+        self.bus = bus
+        self.tr = None                      # set once the Transcriber exists
+        self.cmds = queue.Queue()           # model swaps run on the worker thread
+        self.loading = False
+
+    def status(self):
+        return {
+            "type": "status",
+            "lang": self.args.lang,
+            "model": self.args.model,
+            "loading": self.loading,
+            "translate": bool(self.args.translate),
+            "partials": bool(self.args.partials),
+            "langs": self.args.langs,
+            "models": self.args.model_choices,
+        }
+
+    def push_status(self):
+        self.bus.publish(self.status())
+
+    def handle(self, raw):
+        try:
+            m = json.loads(raw)
+        except (ValueError, TypeError):
+            return
+        cmd, val = m.get("cmd"), m.get("value")
+
+        if cmd == "set_lang":
+            if not valid_language(val):
+                log("ignoring unknown language %r" % (val,))
+                return
+            if val != self.args.lang:
+                self.args.lang = val
+                if self.tr is not None:
+                    self.tr.context = ""        # old-language prompt would poison it
+                log("language -> %s" % val)
+                self.bus.publish({"type": "clear"})
+            self.push_status()
+
+        elif cmd == "set_model":
+            if val and val != self.args.model:
+                self.cmds.put(("model", val))
+            else:
+                self.push_status()
+
+        elif cmd == "set_translate":
+            self.args.translate = bool(val)
+            log("translate -> %s" % self.args.translate)
+            self.push_status()
+
+        elif cmd == "set_partials":
+            self.args.partials = bool(val)
+            log("partials -> %s" % self.args.partials)
+            self.push_status()
+
+        elif cmd == "clear":
+            self.bus.publish({"type": "clear"})
+
+        elif cmd == "status":
+            self.push_status()
+
+
+def valid_language(code):
+    if code == "auto":
+        return True
+    if not isinstance(code, str) or not code:
+        return False
+    try:
+        from faster_whisper.tokenizer import _LANGUAGE_CODES
+        return code in _LANGUAGE_CODES
+    except Exception:
+        return bool(re.fullmatch(r"[a-z]{2,3}", code))
+
 
 def looks_hallucinated(text):
     t = text.strip().lower()
@@ -286,6 +389,31 @@ class Transcriber:
         log("model ready in %.1fs" % (time.time() - t0))
         self.context = ""
         self.busy = threading.Event()
+
+    def reload(self, name, ctl):
+        """Swap the model in place. Runs on the worker thread."""
+        from faster_whisper import WhisperModel
+
+        a = self.args
+        ctl.loading = True
+        ctl.push_status()
+        log("loading model %r ..." % name)
+        t0 = time.time()
+        try:
+            new = WhisperModel(name, device=a.compute_device, compute_type=a.compute,
+                               cpu_threads=a.threads, num_workers=1)
+        except Exception as e:
+            log("model %r failed to load (%s); staying on %r" % (name, e, a.model))
+            ctl.loading = False
+            ctl.push_status()
+            return
+        old, self.model = self.model, new
+        del old
+        a.model = name
+        self.context = ""
+        ctl.loading = False
+        ctl.push_status()
+        log("model -> %s (%.1fs)" % (name, time.time() - t0))
 
     def run(self, audio, final):
         a = self.args
@@ -316,8 +444,28 @@ class Transcriber:
             condition_on_previous_text=False, vad_filter=True, without_timestamps=True)
         return re.sub(r"\s+", " ", " ".join(s.text.strip() for s in segs)).strip()
 
-    def worker(self, jobs, stop):
+    def worker(self, jobs, stop, ctl):
         while not stop.is_set():
+            # Model swaps take priority and must happen on this thread.
+            try:
+                what, value = ctl.cmds.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                if what == "model":
+                    self.busy.set()
+                    try:
+                        while True:                 # drop audio queued for the old model
+                            jobs.get_nowait()
+                            jobs.task_done()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self.reload(value, ctl)
+                    finally:
+                        self.busy.clear()
+                continue
+
             try:
                 kind, audio, sr = jobs.get(timeout=0.25)
             except queue.Empty:
@@ -490,7 +638,12 @@ def build_parser():
     g = p.add_argument_group("model")
     g.add_argument("--model", default="small",
                    help="tiny|base|small|medium|large-v3|large-v3-turbo, or a local CT2 dir")
-    g.add_argument("--lang", default="fi", help="fi, en, sv, ... or 'auto'")
+    g.add_argument("--lang", default="fi", help="fi, ru, ja, es, pt, ... or 'auto'")
+    g.add_argument("--langs", default="fi,ru,ja,es,pt,en,auto",
+                   help="languages offered as one-click buttons in the control panel")
+    g.add_argument("--model-choices", dest="model_choices",
+                   default="tiny,base,small,medium",
+                   help="models offered in the control panel dropdown")
     g.add_argument("--compute-device", default="cpu", choices=["cpu", "cuda"])
     g.add_argument("--compute", default="int8", help="int8|int8_float32|float32|float16")
     g.add_argument("--threads", type=int, default=max(2, (os.cpu_count() or 8) - 2))
@@ -527,6 +680,12 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    args.langs = [s.strip() for s in args.langs.split(",") if s.strip()]
+    args.model_choices = [s.strip() for s in args.model_choices.split(",") if s.strip()]
+    if args.model not in args.model_choices:
+        args.model_choices.insert(0, args.model)
+    if args.lang not in args.langs:
+        args.langs.insert(0, args.lang)
 
     if args.list_devices:
         list_devices()
@@ -538,7 +697,9 @@ def main():
     stop_ev = threading.Event()
     jobs = queue.Queue(maxsize=3)
 
+    ctl = Controller(args, bus)
     tr = Transcriber(args, bus)
+    ctl.tr = tr
     dev = resolve_device(args.audio_device, args.loopback)
 
     srv = http_server(args)
@@ -548,10 +709,10 @@ def main():
 
     def run_loop():
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(ws_server(bus, args, ws_stop))
+        loop.run_until_complete(ws_server(bus, args, ctl, ws_stop))
 
     threading.Thread(target=run_loop, daemon=True).start()
-    threading.Thread(target=tr.worker, args=(jobs, stop_ev), daemon=True).start()
+    threading.Thread(target=tr.worker, args=(jobs, stop_ev, ctl), daemon=True).start()
 
     try:
         with Capture(dev, args.loopback) as cap:

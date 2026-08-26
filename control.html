@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>livecap control</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --fg: #e8ecf3; --dim: #98a2b3; --accent: #7dd3fc; --ok: #4ade80; --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 "Inter", "Segoe UI", system-ui, sans-serif;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; display: grid; gap: 18px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: .01em; }
+  h1 span { color: var(--dim); font-weight: 400; font-size: 13px; margin-left: 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .card h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--dim); margin: 0 0 12px; font-weight: 600;
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button {
+    font: inherit; font-weight: 550; color: var(--fg); cursor: pointer;
+    background: #1e2430; border: 1px solid var(--line); border-radius: 7px;
+    padding: 8px 14px; transition: background .12s, border-color .12s;
+  }
+  button:hover:not(:disabled) { background: #273040; border-color: #3a4256; }
+  button.on { background: var(--accent); border-color: var(--accent); color: #06202c; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button .k {
+    font-size: 11px; color: var(--dim); margin-left: 7px;
+    font-variant-numeric: tabular-nums;
+  }
+  button.on .k { color: #06202c; opacity: .65; }
+  select {
+    font: inherit; color: var(--fg); background: #1e2430;
+    border: 1px solid var(--line); border-radius: 7px; padding: 8px 12px;
+  }
+  .status { display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; }
+  .status b { font-weight: 600; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 7px; }
+  .dot.up { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.down { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+  .dot.busy { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  #feed { display: grid; gap: 7px; min-height: 76px; }
+  .cap { padding: 8px 11px; background: #12161d; border-left: 2px solid var(--line); border-radius: 4px; }
+  .cap.partial { color: var(--dim); font-style: italic; border-left-color: var(--warn); }
+  .cap .tr { display: block; color: var(--accent); font-size: 13px; margin-top: 3px; }
+  .empty { color: var(--dim); font-size: 13px; }
+  .hint { color: var(--dim); font-size: 12.5px; margin-top: 10px; }
+  code { background: #12161d; padding: 2px 6px; border-radius: 4px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>livecap<span id="conn">connecting…</span></h1>
+
+  <div class="card">
+    <h2>Language</h2>
+    <div class="row" id="langs"></div>
+    <div class="hint">Press <code>1</code>–<code>9</code> to switch instantly. Takes
+      effect on the next sentence; no restart, no model reload.</div>
+  </div>
+
+  <div class="card">
+    <h2>Model</h2>
+    <div class="row">
+      <select id="model"></select>
+      <span id="loading" class="empty"></span>
+    </div>
+    <div class="hint">Switching reloads the model and pauses captions for a few
+      seconds. Bigger is more accurate but slower.</div>
+  </div>
+
+  <div class="card">
+    <h2>Options</h2>
+    <div class="row">
+      <button id="translate">English translation</button>
+      <button id="partials">Live partial text</button>
+      <button id="clear">Clear captions</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Live output</h2>
+    <div id="feed"><div class="empty">Waiting for speech…</div></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const q = new URLSearchParams(location.search);
+  const WS_PORT = parseInt(q.get("ws") || "8765", 10);
+
+  // Whisper has no regional variants: Argentine Spanish is served by "es".
+  const NAMES = {
+    fi: "Finnish", ru: "Russian", ja: "Japanese", es: "Spanish",
+    pt: "Portuguese", en: "English", sv: "Swedish", de: "German",
+    fr: "French", it: "Italian", pl: "Polish", uk: "Ukrainian",
+    et: "Estonian", no: "Norwegian", da: "Danish", nl: "Dutch",
+    zh: "Chinese", ko: "Korean", auto: "Auto-detect"
+  };
+
+  let ws = null, state = null;
+  const feed = [];
+
+  const el = (id) => document.getElementById(id);
+  const send = (cmd, value) => ws && ws.readyState === 1 &&
+        ws.send(JSON.stringify({ cmd: cmd, value: value }));
+
+  function renderControls() {
+    if (!state) return;
+
+    const langs = el("langs");
+    langs.innerHTML = "";
+    state.langs.forEach((code, i) => {
+      const b = document.createElement("button");
+      b.className = code === state.lang ? "on" : "";
+      b.innerHTML = "";
+      b.appendChild(document.createTextNode(NAMES[code] || code));
+      if (i < 9) {
+        const k = document.createElement("span");
+        k.className = "k";
+        k.textContent = i + 1;
+        b.appendChild(k);
+      }
+      b.onclick = () => send("set_lang", code);
+      langs.appendChild(b);
+    });
+
+    const sel = el("model");
+    if (sel.dataset.key !== state.models.join(",")) {
+      sel.dataset.key = state.models.join(",");
+      sel.innerHTML = "";
+      state.models.forEach((m) => {
+        const o = document.createElement("option");
+        o.value = m; o.textContent = m;
+        sel.appendChild(o);
+      });
+    }
+    sel.value = state.model;
+    sel.disabled = state.loading;
+    el("loading").textContent = state.loading ? "loading model…" : "";
+
+    el("translate").className = state.translate ? "on" : "";
+    el("partials").className = state.partials ? "on" : "";
+
+    el("conn").innerHTML = "";
+    const dot = document.createElement("span");
+    dot.className = "dot " + (state.loading ? "busy" : "up");
+    el("conn").appendChild(dot);
+    el("conn").appendChild(document.createTextNode(
+      (NAMES[state.lang] || state.lang) + " · " + state.model));
+  }
+
+  function renderFeed() {
+    const box = el("feed");
+    box.innerHTML = "";
+    if (!feed.length) {
+      box.innerHTML = '<div class="empty">Waiting for speech…</div>';
+      return;
+    }
+    feed.slice(-6).forEach((m) => {
+      const d = document.createElement("div");
+      d.className = "cap" + (m.type === "partial" ? " partial" : "");
+      d.textContent = m.text;
+      if (m.tr) {
+        const s = document.createElement("span");
+        s.className = "tr";
+        s.textContent = m.tr;
+        d.appendChild(s);
+      }
+      box.appendChild(d);
+    });
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function connect() {
+    ws = new WebSocket("ws://127.0.0.1:" + WS_PORT);
+
+    ws.onopen = () => send("status");
+
+    ws.onclose = () => {
+      el("conn").innerHTML = '<span class="dot down"></span>disconnected — is run.ps1 still going?';
+      setTimeout(connect, 1500);
+    };
+    ws.onerror = () => ws.close();
+
+    ws.onmessage = (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+
+      if (m.type === "status") {
+        state = m;
+        renderControls();
+      } else if (m.type === "clear") {
+        feed.length = 0;
+        renderFeed();
+      } else if (m.type === "partial") {
+        if (feed.length && feed[feed.length - 1].type === "partial") feed.pop();
+        feed.push(m);
+        renderFeed();
+      } else if (m.type === "final") {
+        if (feed.length && feed[feed.length - 1].type === "partial") feed.pop();
+        feed.push(m);
+        if (feed.length > 40) feed.shift();
+        renderFeed();
+      }
+    };
+  }
+
+  el("model").onchange = (e) => send("set_model", e.target.value);
+  el("translate").onclick = () => state && send("set_translate", !state.translate);
+  el("partials").onclick = () => state && send("set_partials", !state.partials);
+  el("clear").onclick = () => send("clear");
+
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "SELECT") return;
+    const n = parseInt(e.key, 10);
+    if (state && n >= 1 && n <= 9 && state.langs[n - 1]) {
+      send("set_lang", state.langs[n - 1]);
+    }
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>

@@ -51,6 +51,50 @@ Check your devices first if needed:
 .\run.ps1 --list-devices
 ```
 
+## Changing language and model while streaming
+
+`run.ps1` also prints a control panel URL. Open it in any browser (a second
+monitor, a phone on the same machine, or an OBS dock via
+**Docks → Custom Browser Docks**):
+
+```
+http://127.0.0.1:8777/control.html?ws=8765
+```
+
+- **Language** — one click, or press `1`–`9`. Applies to the next sentence.
+  No restart and no model reload, so it is effectively instant.
+- **Model** — a dropdown. Swapping reloads the model, which pauses captions for
+  a few seconds; the panel shows a *loading* state while it happens.
+- **Toggles** — English translation, live partial text, and clear captions.
+- A live feed of what is being recognised, so you can sanity-check without
+  looking at the stream.
+
+Choose which languages get buttons:
+
+```bash
+.\run.ps1 --langs fi,ru,ja,es,pt,en,auto --lang fi
+```
+
+That default set covers Finnish, Russian, Japanese, Spanish, Portuguese,
+English and auto-detect. Any [Whisper language code](https://github.com/openai/whisper#available-models-and-languages)
+works.
+
+Two things worth knowing:
+
+- **Whisper has no regional variants.** Argentine Spanish is `es` — there is no
+  `es-AR`. The model handles Rioplatense pronunciation and *voseo* as part of
+  `es`, but it normalises toward standard orthography and will not reliably
+  reproduce regional slang. The same applies to Brazilian vs. European
+  Portuguese: both are `pt`.
+- **`auto` re-detects per segment**, which sounds ideal for multilingual streams
+  but flips on short or noisy utterances and can mislabel mid-sentence. For a
+  stream that switches language deliberately, the `1`–`9` keys are far more
+  reliable than `auto`.
+
+Wider models are better at non-English audio. If you mostly caption Russian or
+Japanese, `medium` is worth the latency if your CPU can take it — check with
+`bench.py` first.
+
 ## Choosing what gets captioned
 
 **Default (`--loopback`)** captures everything your speakers play — guests,
