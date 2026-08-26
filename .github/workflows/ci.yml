@@ -26,12 +26,15 @@ jobs:
           pip install -r requirements.txt
 
       - name: Byte-compile
-        run: python -m compileall -q livecap.py bench.py
+        run: python -m compileall -q livecap.py bench.py subtitle.py
 
       - name: CLI smoke check
         run: |
           python livecap.py --help
           python bench.py --help
+          python subtitle.py --help
 
       - name: Tests
-        run: python tests/test_smoke.py
+        run: |
+          python tests/test_smoke.py
+          python tests/test_subtitle.py

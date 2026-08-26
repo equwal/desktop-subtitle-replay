@@ -2,4 +2,5 @@ faster-whisper>=1.1.0
 soundcard>=0.4.3
 numpy>=1.26
 scipy>=1.11
+pillow>=10.0
 websockets>=12.0

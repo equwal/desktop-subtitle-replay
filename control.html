@@ -81,6 +81,7 @@
     <div class="row">
       <button id="translate">English translation</button>
       <button id="partials">Live partial text</button>
+      <button id="test">Send test caption</button>
       <button id="clear">Clear captions</button>
     </div>
   </div>
@@ -217,6 +218,7 @@
   el("translate").onclick = () => state && send("set_translate", !state.translate);
   el("partials").onclick = () => state && send("set_partials", !state.partials);
   el("clear").onclick = () => send("clear");
+  el("test").onclick = () => send("test");
 
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "SELECT") return;

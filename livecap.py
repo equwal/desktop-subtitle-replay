@@ -283,6 +283,8 @@ def http_server(args):
     log("  " + url)
     log("Control panel (open in any browser):")
     log("  http://127.0.0.1:%d/control.html?ws=%d" % (args.http_port, args.ws_port))
+    log("Reader for Yomitan mining (open in your real browser):")
+    log("  http://127.0.0.1:%d/reader.html?ws=%d" % (args.http_port, args.ws_port))
     return srv
 
 
@@ -350,6 +352,13 @@ class Controller:
 
         elif cmd == "clear":
             self.bus.publish({"type": "clear"})
+
+        elif cmd == "test":
+            # Lets you position the OBS overlay without having to talk.
+            text = val if isinstance(val, str) and val.strip() else \
+                "Testiteksti — проверка — テスト — caption preview"
+            self.bus.publish({"type": "final", "text": text, "tr": "",
+                              "ts": time.time()})
 
         elif cmd == "status":
             self.push_status()
@@ -503,6 +512,190 @@ class Transcriber:
 
 
 # ---------------------------------------------------------- segmentation ----
+
+SENT_END = (".", "!", "?", "…", "。", "！", "？")
+
+
+def norm_word(w):
+    return re.sub(r"[^\w]", "", w.strip().lower(), flags=re.UNICODE)
+
+
+class StreamDecoder:
+    """LocalAgreement streaming (Macháček et al.).
+
+    Whisper cannot decode incrementally, so instead we re-decode a growing
+    buffer and only commit the prefix that two consecutive hypotheses agree
+    on. Agreement is a good proxy for stability: text that survives another
+    decode with more audio behind it rarely changes again. This trades CPU
+    for latency - words appear while someone is still talking, rather than
+    a whole sentence landing after they stop.
+    """
+
+    def __init__(self, tr, bus, args):
+        self.tr, self.bus, self.args = tr, bus, args
+        self.native = []            # unconsumed audio at capture rate
+        self.prev = []              # previous hypothesis, uncommitted part
+        self.sentence = []          # committed words of the sentence in progress
+        self.speech = 0.0           # seconds of speech currently buffered
+
+    # ---- audio -------------------------------------------------------
+    def add(self, block, voiced, dur):
+        self.native.append(block)
+        if voiced:
+            self.speech += dur
+
+    def buffered_seconds(self, sr):
+        return sum(len(b) for b in self.native) / sr
+
+    def _audio16(self, sr):
+        return to_whisper(np.concatenate(self.native), sr)
+
+    def _trim(self, cut_s, sr):
+        """Drop audio up to cut_s seconds, keeping block boundaries simple."""
+        drop = int(cut_s * sr)
+        merged = np.concatenate(self.native)
+        merged = merged[min(drop, len(merged)):]
+        self.native = [merged] if len(merged) else []
+        self.speech = max(0.0, self.speech - cut_s)
+
+    # ---- decoding ----------------------------------------------------
+    def _hypothesis(self, sr):
+        a = self.args
+        audio = self._audio16(sr)
+        # Whisper invents text when handed a very short buffer, and in
+        # streaming that invention gets committed before real audio arrives.
+        if len(audio) < int(a.stream_min_audio * TARGET_SR):
+            return [], audio
+        segs, _ = self.tr.model.transcribe(
+            audio,
+            language=None if a.lang == "auto" else a.lang,
+            beam_size=1,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            initial_prompt=(self.tr.context or None) if not a.no_context else None,
+            vad_filter=False,
+            word_timestamps=True,
+            no_speech_threshold=0.6,
+            log_prob_threshold=-1.0,
+        )
+        words = []
+        for s in segs:
+            words.extend(getattr(s, "words", None) or [])
+        return words, audio
+
+    def step(self, sr):
+        words, _ = self._hypothesis(sr)
+        if not words:
+            return
+
+        k = 0
+        while (k < len(words) and k < len(self.prev)
+               and norm_word(words[k].word) == norm_word(self.prev[k].word)
+               and norm_word(words[k].word)):
+            k += 1
+
+        confirmed, rest = words[:k], words[k:]
+        if confirmed:
+            cut = confirmed[-1].end
+            self.sentence.extend(confirmed)
+            self._trim(cut, sr)
+            # Remaining words are now measured against a shorter buffer.
+            for w in rest:
+                w.start = max(0.0, w.start - cut)
+                w.end = max(0.0, w.end - cut)
+        self.prev = rest
+
+        text = self._text(self.sentence)
+        tail = self._text(rest)
+        if confirmed and text and text.strip().endswith(SENT_END):
+            self.flush()
+        elif text or tail:
+            self.bus.publish({"type": "partial",
+                              "text": (text + " " + tail).strip(),
+                              "ts": time.time()})
+
+    @staticmethod
+    def _text(words):
+        return re.sub(r"\s+", " ", "".join(w.word for w in words)).strip()
+
+    def flush(self, drop_audio=False):
+        """Emit the sentence built so far as a final caption."""
+        text = self._text(self.sentence)
+        self.sentence = []
+        if drop_audio:
+            self.native, self.prev, self.speech = [], [], 0.0
+        if not text or looks_hallucinated(text):
+            if text:
+                log("dropped: %r" % text)
+            return
+        if not self.args.no_context:
+            self.tr.context = (self.tr.context + " " + text)[-220:]
+        log("FINAL  %s" % text)
+        self.bus.publish({"type": "final", "text": text, "tr": "", "ts": time.time()})
+
+
+def stream_segmenter(cap, tr, args, stop, bus):
+    """Low-latency path: continuous re-decode with LocalAgreement commits."""
+    dur = cap.blocksize / cap.sr
+    noise = 1e-4
+    dec = StreamDecoder(tr, bus, args)
+    silence = 0.0
+    last_step = 0.0
+    log("streaming mode: committing on agreement every %.1fs" % args.stream_interval)
+
+    while not stop.is_set():
+        drained = 0
+        while True:
+            try:
+                blk = cap.q.get_nowait()
+            except queue.Empty:
+                break
+            drained += 1
+            rms = float(np.sqrt(np.mean(blk * blk)) + 1e-12)
+            if rms < noise:
+                noise = 0.90 * noise + 0.10 * rms
+            else:
+                noise = 0.995 * noise + 0.005 * rms
+            voiced = rms > max(noise * args.vad_ratio, args.vad_floor)
+            silence = 0.0 if voiced else silence + dur
+            if voiced or dec.native:
+                dec.add(blk, voiced, dur)
+
+        if not drained:
+            time.sleep(0.02)
+
+        now = time.time()
+        buffered = dec.buffered_seconds(cap.sr)
+
+        # A long pause ends the sentence: commit whatever is left.
+        if dec.native and silence >= args.pause:
+            if dec.speech >= args.min_speech:
+                dec.step(cap.sr)
+                if dec.prev:
+                    dec.sentence.extend(dec.prev)
+                    dec.prev = []
+            dec.flush(drop_audio=True)
+            silence = 0.0
+            last_step = now
+            continue
+
+        if buffered >= args.max_seg:
+            dec.step(cap.sr)
+            if dec.prev:
+                dec.sentence.extend(dec.prev)
+                dec.prev = []
+            dec.flush(drop_audio=True)
+            last_step = now
+            continue
+
+        if (dec.speech >= args.min_speech
+                and now - last_step >= args.stream_interval):
+            last_step = now
+            try:
+                dec.step(cap.sr)
+            except Exception as e:
+                log("stream decode error:", repr(e))
+
 
 def segmenter(cap, tr, jobs, args, stop):
     dur = cap.blocksize / cap.sr
@@ -663,6 +856,15 @@ def build_parser():
     g.add_argument("--no-partials", dest="partials", action="store_false",
                    help="only show finished sentences (lower CPU)")
     g.add_argument("--partial-every", type=float, default=0.9)
+    g.add_argument("--stream", action="store_true",
+                   help="LocalAgreement streaming: words appear while someone is "
+                        "still talking instead of after they stop. Costs a lot "
+                        "more CPU - pair it with a smaller --model")
+    g.add_argument("--stream-interval", type=float, default=0.8,
+                   help="how often to re-decode the buffer in --stream mode")
+    g.add_argument("--stream-min-audio", type=float, default=1.5,
+                   help="do not decode until this much audio is buffered; "
+                        "shorter buffers make Whisper hallucinate")
 
     g = p.add_argument_group("output")
     g.add_argument("--ws-port", type=int, default=8765)
@@ -712,12 +914,17 @@ def main():
         loop.run_until_complete(ws_server(bus, args, ctl, ws_stop))
 
     threading.Thread(target=run_loop, daemon=True).start()
-    threading.Thread(target=tr.worker, args=(jobs, stop_ev, ctl), daemon=True).start()
+    if not args.stream:
+        threading.Thread(target=tr.worker, args=(jobs, stop_ev, ctl),
+                         daemon=True).start()
 
     try:
         with Capture(dev, args.loopback) as cap:
             log("lang=%s  model=%s  -- Ctrl+C to stop" % (args.lang, args.model))
-            segmenter(cap, tr, jobs, args, stop_ev)
+            if args.stream:
+                stream_segmenter(cap, tr, args, stop_ev, bus)
+            else:
+                segmenter(cap, tr, jobs, args, stop_ev)
     except KeyboardInterrupt:
         print()
         log("stopping")

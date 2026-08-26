@@ -1,25 +1,32 @@
-# livecap — live captions for OBS
+# desktop-subtitle-replay
 
-Real-time speech captions for OBS Studio on Windows. Captures audio, detects
-speech, transcribes it with Whisper, and renders it into a transparent Browser
-Source overlay.
+Live subtitles for anything playing on your desktop, plus a mining workflow for
+the clips you save afterwards. Built for language learning: understand it now,
+turn it into Anki cards later.
 
 Runs entirely on your machine. No API keys, no cloud, no internet after the
-model is downloaded. Built for Finnish, works with any language Whisper
-supports.
+model downloads.
 
 ```
-audio device ──► VAD segmenter ──► faster-whisper ──► WebSocket ──► overlay.html
-                                                  └─► captions.txt (GDI+ fallback)
+                    ┌─► OBS overlay        (captions on the stream)
+desktop audio ──────┼─► reader.html        (selectable text — Yomitan mines it)
+   (live)           └─► captions.txt/log   (plain text)
+
+replay clip ────────┬─► clip.srt           (subtitles)
+   (offline)        ├─► clip.html          (video + hoverable synced subs)
+                    └─► clip.anki.tsv      (one card per sentence + audio)
 ```
+
+Two halves, because they want opposite things. Live needs speed and accepts
+mistakes. Replay needs accuracy and does not care about time.
 
 ## Requirements
 
 - Windows 10/11
 - Python 3.9–3.12 (3.11 recommended)
-- OBS Studio 28+
+- OBS Studio 28+ (only for the live overlay)
 - ~2 GB disk for the model cache
-- A GPU is *not* required — this is tuned to run on CPU
+- A GPU is *not* required, but it changes what is possible — see below
 
 ## Install
 
@@ -27,132 +34,174 @@ audio device ──► VAD segmenter ──► faster-whisper ──► WebSocke
 .\setup.ps1
 ```
 
-Creates a `.venv` and installs dependencies. One-time.
-
-## Run
+## Live captions
 
 ```bash
 .\run.ps1
 ```
 
-Prints a Browser Source URL. In OBS: **+ → Browser**, paste it, set
-**1920 × 1080**, and untick **Shutdown source when not visible**.
+Prints three URLs:
 
-```
-http://127.0.0.1:8777/overlay.html?ws=8765&lines=2&size=42&hide=8
-```
+| page | where it goes |
+|---|---|
+| `overlay.html` | OBS Browser Source — captions burned into the stream |
+| `reader.html` | **your real browser** — selectable text for Yomitan |
+| `control.html` | language and model switching while running |
 
-The overlay is transparent and places captions in the lower third. Keep the
-console window open while streaming; Ctrl+C stops it.
+For OBS: **+ → Browser**, paste the overlay URL, **1920 × 1080**, untick
+**Shutdown source when not visible**.
 
-Check your devices first if needed:
+For mining: open `reader.html` in the browser where Yomitan is installed. Each
+sentence is a plain DOM text node, so Yomitan's popup and its sentence field
+work normally. The timestamp is drawn with CSS rather than text, so it never
+gets absorbed into the sentence you mine.
 
-```bash
-.\run.ps1 --list-devices
-```
+### Changing language and model mid-session
 
-## Changing language and model while streaming
-
-`run.ps1` also prints a control panel URL. Open it in any browser (a second
-monitor, a phone on the same machine, or an OBS dock via
-**Docks → Custom Browser Docks**):
-
-```
-http://127.0.0.1:8777/control.html?ws=8765
-```
-
-- **Language** — one click, or press `1`–`9`. Applies to the next sentence.
-  No restart and no model reload, so it is effectively instant.
-- **Model** — a dropdown. Swapping reloads the model, which pauses captions for
-  a few seconds; the panel shows a *loading* state while it happens.
-- **Toggles** — English translation, live partial text, and clear captions.
-- A live feed of what is being recognised, so you can sanity-check without
-  looking at the stream.
-
-Choose which languages get buttons:
+Open `control.html`. Language switches on one click or keys `1`–`9` and applies
+to the next sentence — no reload. Model switching reloads and pauses captions
+for a few seconds. Defaults cover `fi,ru,ja,es,pt,en,auto`:
 
 ```bash
 .\run.ps1 --langs fi,ru,ja,es,pt,en,auto --lang fi
 ```
 
-That default set covers Finnish, Russian, Japanese, Spanish, Portuguese,
-English and auto-detect. Any [Whisper language code](https://github.com/openai/whisper#available-models-and-languages)
-works.
+**Whisper has no regional variants.** Argentine Spanish is `es`; there is no
+`es-AR`. It handles Rioplatense pronunciation and *voseo*, but normalises
+toward standard orthography and will not reliably reproduce regional slang.
+Brazilian and European Portuguese are both `pt`.
 
-Two things worth knowing:
+**`auto` re-detects per segment**, which flips on short or noisy audio and can
+mislabel mid-sentence. For deliberate language changes the `1`–`9` keys are far
+more reliable.
 
-- **Whisper has no regional variants.** Argentine Spanish is `es` — there is no
-  `es-AR`. The model handles Rioplatense pronunciation and *voseo* as part of
-  `es`, but it normalises toward standard orthography and will not reliably
-  reproduce regional slang. The same applies to Brazilian vs. European
-  Portuguese: both are `pt`.
-- **`auto` re-detects per segment**, which sounds ideal for multilingual streams
-  but flips on short or noisy utterances and can mislabel mid-sentence. For a
-  stream that switches language deliberately, the `1`–`9` keys are far more
-  reliable than `auto`.
+### Choosing what gets captioned
 
-Wider models are better at non-English audio. If you mostly caption Russian or
-Japanese, `medium` is worth the latency if your CPU can take it — check with
-`bench.py` first.
+Default loopback captures everything your speakers play. Your own microphone is
+*not* included unless OBS monitors it, and music gets transcribed too.
 
-## Choosing what gets captioned
+With [VB-Audio Virtual Cable](https://vb-audio.com/Cable/), send only what you
+want captioned:
 
-**Default (`--loopback`)** captures everything your speakers play — guests,
-video, game audio, music. Zero setup. The catch: your own microphone is *not*
-included unless OBS monitors it, and music gets fed to Whisper too.
-
-**Recommended: route a dedicated mix through a virtual cable.** With
-[VB-Audio Virtual Cable](https://vb-audio.com/Cable/) installed:
-
-1. OBS → **Settings → Audio → Advanced → Monitoring Device** =
-   `CABLE Input (VB-Audio Virtual Cable)`
-2. Audio Mixer → gear icon on each source you want captioned →
-   **Advanced Audio Properties** → **Audio Monitoring** = **Monitor and Output**
-   (this keeps the source audible to viewers; *Monitor Only* would mute it)
-3. Leave music, game and alert sources on **Monitor Off**
-4. Run:
+1. OBS → **Settings → Audio → Advanced → Monitoring Device** = `CABLE Input`
+2. Audio Mixer → gear on each source → **Advanced Audio Properties** →
+   **Audio Monitoring** = **Monitor and Output**
+3. Leave music and alerts on **Monitor Off**
 
 ```bash
 .\run.ps1 --mic --audio-device CABLE
 ```
 
-Accuracy improves noticeably once Whisper stops trying to transcribe your
-background music.
+## Subtitling replay clips
 
-## Model selection
+```bash
+.\.venv\Scripts\python.exe subtitle.py clip.mp4
+```
 
-Measured on a 16-core CPU with no CUDA GPU, `int8` quantisation:
+Writes `clip.srt` and `clip.html` next to the clip. The HTML page is the mining
+surface: video on the left, every sentence listed as selectable text, click to
+seek, `Loop cue` to repeat a line while you work it out.
 
-| model | real speech RTF | latency per segment | Finnish quality |
-|---|---|---|---|
-| `tiny` | 0.07 | ~0.4 s | poor |
-| `base` | 0.10 | ~0.6 s | weak |
-| **`small`** (default) | **0.57** | **~2.5 s** | good |
-| `large-v3-turbo` | 1.77 | ~10.6 s | unusable — falls behind |
+Watch your replay folder and subtitle clips automatically as OBS saves them:
 
-RTF (real-time factor) below ~0.6 keeps up with continuous speech. Without a
-CUDA GPU, `small` is the largest model that stays real-time, which is why it is
-the default. With an NVIDIA GPU, add `--compute-device cuda --compute float16`
-and `large-v3` becomes viable.
+```bash
+.\.venv\Scripts\python.exe subtitle.py --watch "C:\Users\you\Videos" --serve
+```
+
+`--serve` matters more than it looks. Opening `clip.html` from `file://`
+requires enabling Yomitan's *Allow access to file URLs*, and serving it through
+`python -m http.server` **silently breaks video seeking**, because that server
+ignores HTTP Range requests. `--serve` runs a range-capable server, so scrubbing
+works and Yomitan needs no extra permission.
+
+### Anki cards
+
+```bash
+.\.venv\Scripts\python.exe subtitle.py clip.mp4 --anki
+```
+
+Produces `clip.anki.tsv` (one row per sentence) plus a media folder of
+per-sentence audio clips, with columns: sentence, translation, `[sound:…]`,
+`<img>`, source file, timestamp. Copy the media into your Anki
+`collection.media` and import the TSV.
+
+This is the batch path. If you mine word-by-word with Yomitan, use `clip.html`
+instead and let Yomitan build the cards — it captures the sentence context on
+its own, which is usually what you want.
+
+Screenshots need Pillow (`pip install pillow`); without it the image column is
+left empty and everything else still works.
+
+## Speed, honestly
+
+Measured on a 16-core CPU, no CUDA, `int8`, on real Finnish speech:
+
+| model | RTF | verdict |
+|---|---|---|
+| `tiny` | 0.07 | fast, poor Finnish |
+| `base` | 0.10 | fast, weak Finnish |
+| **`small`** (live default) | **0.57** | the practical ceiling on CPU |
+| `large-v3-turbo` (replay default) | 1.77 | too slow live, ideal offline |
+
+RTF is measured over a whole file. **Per segment during a live stream it is
+worse** — short utterances pay a fixed encoder cost, so real sessions show 0.55
+to 1.4, occasionally decoding slower than real time. Expect captions **3–8 s
+behind the speaker**, not 1 s. That is inherent to the approach, not a bug.
 
 Benchmark your own machine:
 
 ```bash
-.\.venv\Scripts\python.exe .\bench.py --models small,medium
+.\.venv\Scripts\python.exe bench.py --models small,medium
 ```
 
-Synthetic audio makes models look faster than they are, because there are fewer
-tokens to decode. For a realistic number, point it at a recording:
+Synthetic audio flatters models because there are fewer tokens to decode. Point
+it at a real recording for a number you can trust:
 
 ```bash
-.\.venv\Scripts\python.exe .\bench.py --wav selftest.wav
+.\.venv\Scripts\python.exe bench.py --wav selftest.wav
+```
+
+### Why it is not truly real-time
+
+Whisper is an offline encoder-decoder over fixed 30-second windows. It cannot
+emit a word until it has a chunk to process, so this waits for a pause and
+transcribes the finished utterance. That is chunked pseudo-streaming, not
+streaming ASR.
+
+Engines that genuinely stream — Kaldi/Vosk online decoding, sherpa-onnx
+Zipformer transducers — emit ~200–500 ms after the sound. Vosk covers Russian,
+Japanese, Spanish and Portuguese, **but has no Finnish model**. Nothing
+genuinely streaming covers this language set; Whisper covers all of it and is
+not streaming.
+
+`--stream` implements LocalAgreement streaming (Macháček et al.): re-decode a
+growing buffer, commit only the prefix two consecutive decodes agree on. It is
+**off by default because it measured worse here on both axes**, on the same
+17.6 s Finnish clip:
+
+| mode | speed | output |
+|---|---|---|
+| chunked `small` | 0.57× | *"Nyt ollaan taas sen verran syrjäisillä seuduilla ja harvakseltaan kuljetuilla seuduilla."* |
+| `--stream small` | 3.58× | too slow to run |
+| `--stream base` | 0.96× | *"Tolaan taas sen verran Syrjää Näissä ei sillä seudulla…"* |
+| `--stream tiny` | 0.34× | *"Kösitäästä. Ja tolaa on… parvaksiautaa"* |
+
+The models fast enough to stream are too weak for Finnish; the model good
+enough for Finnish is 3.6× too slow. **With a CUDA GPU this inverts** — run
+`--stream --compute-device cuda --compute float16 --model large-v3` and
+LocalAgreement becomes the better mode.
+
+To reduce latency without it, shorten the silence needed to close a caption and
+free up CPU:
+
+```bash
+.\run.ps1 --pause 0.4 --no-partials
 ```
 
 ### Better Finnish at the same speed
 
-Stock `small` is a generalist. A Finnish-fine-tuned `small` is the same size —
-so the same speed — but markedly better at Finnish.
-`get-finnish-model.ps1` fetches one and converts it to CTranslate2:
+Stock `small` is a generalist. A Finnish-fine-tuned `small` is the same size, so
+the same speed, but markedly better at Finnish:
 
 ```bash
 .\get-finnish-model.ps1
@@ -162,45 +211,48 @@ so the same speed — but markedly better at Finnish.
 .\run.ps1 --model .\build\models\fi-small-ct2
 ```
 
-The conversion needs ~8 GB free and pulls in torch, which is used only for that
-one-off step. Use `-BuildRoot D:\somewhere` to build on another drive, and
-delete `.venv-convert` under the build root afterwards to reclaim the space.
+Needs ~8 GB free and pulls torch for the one-off conversion; use
+`-BuildRoot D:\somewhere` to build elsewhere, then delete `.venv-convert`.
 
-## Caption latency and stream delay
+## Syncing captions to the picture
 
-The overlay is composited into the program feed *before* any stream delay or
-replay buffer, so captions ride along with the video automatically — a buffer
-needs no special handling.
+The overlay is composited before any stream delay or replay buffer, so captions
+ride along with the video automatically.
 
-A caption appears roughly **2.5 s after the sentence ends**: inference time plus
-the 0.65 s of silence used to detect the end of the sentence. To lock captions
-to lips, delay the picture to match:
+To line captions up with lips, delay the picture by the caption latency:
 
-- **Render Delay** filter of `2500` ms on your video sources
-- **Sync Offset** of `2500` ms on the audio sources
-  (Advanced Audio Properties)
+- **Render Delay** filter of `2500`–`4000` ms on video sources
+- matching **Sync Offset** on audio sources (Advanced Audio Properties)
 
-If you already run a replay buffer or stream delay, the extra 2.5 s costs you
-nothing.
+If you already run a replay buffer, this costs you nothing.
 
 ## Options
 
+`livecap.py`:
+
 | flag | default | effect |
 |---|---|---|
-| `--lang` | `fi` | `fi`, `en`, `sv`, … or `auto` |
-| `--model` | `small` | model name or a local CTranslate2 directory |
-| `--mic` | off | capture an input device instead of desktop output |
-| `--audio-device` | auto | index from `--list-devices`, or part of the name |
-| `--pause` | `0.65` | silence (s) that ends a caption; lower = snappier, more fragments |
+| `--lang` / `--langs` | `fi` / `fi,ru,ja,es,pt,en,auto` | active language, and the panel's buttons |
+| `--model` | `small` | model name or local CTranslate2 directory |
+| `--mic` / `--audio-device` | loopback / auto | capture an input device instead |
+| `--pause` | `0.65` | silence that closes a caption; lower is snappier |
 | `--min-speech` | `0.45` | ignore bursts shorter than this |
-| `--max-seg` | `11.0` | force a cut during non-stop speech |
-| `--vad-floor` | `0.004` | absolute level gate; raise if noise triggers captions |
-| `--vad-ratio` | `3.0` | gate relative to the running noise floor |
-| `--no-partials` | off | only show finished sentences; roughly halves CPU |
-| `--translate` | off | add an English line beneath the original |
-| `--lines` / `--size` | `2` / `42` | overlay line count and font size |
-| `--hide` | `8` | fade the overlay out after N idle seconds |
-| `--compute-device` | `cpu` | `cuda` if you have an NVIDIA GPU |
+| `--vad-floor` / `--vad-ratio` | `0.004` / `3.0` | speech gate, absolute and relative |
+| `--no-partials` | off | finished sentences only; roughly halves CPU |
+| `--stream` | off | LocalAgreement streaming (see above) |
+| `--translate` | off | add an English line |
+| `--compute-device` | `cpu` | `cuda` with an NVIDIA GPU |
+
+`subtitle.py`:
+
+| flag | default | effect |
+|---|---|---|
+| `--model` | `large-v3-turbo` | accuracy over speed |
+| `--watch FOLDER` | — | subtitle clips as they appear |
+| `--serve [PORT]` | — | range-capable server so seeking works |
+| `--anki` / `--anki-translate` | off | card export, with English backs |
+| `--format` | `srt` | `srt`, `vtt`, `txt` |
+| `--width` / `--max-chars` | `42` / `84` | line and cue length |
 
 ## Diagnostics
 
@@ -208,65 +260,42 @@ nothing.
 .\run.ps1 --selftest 12
 ```
 
-Records 12 s, writes `selftest.wav`, transcribes it once and reports the
-real-time factor. Run this first — speak or play audio during those 12 seconds
-and check what comes back.
+Records 12 s, writes `selftest.wav`, transcribes it and reports the real-time
+factor. Run this first.
 
 ```bash
 .\run.ps1 --meter
 ```
 
-Live level meter showing the VAD gate, for tuning `--vad-floor`. Add
-`--verbose` to log every segment the VAD decides to send.
+Level meter with the VAD gate, for tuning `--vad-floor`. `--verbose` logs every
+segment the VAD sends.
 
 | symptom | cause |
 |---|---|
-| `no speech recognised in N.Ns segment` | music/noise reaching Whisper, or wrong `--lang` |
-| nothing at all in the log | VAD never fires — check `--meter`, wrong device |
-| `backlog full` | model too slow for real time; use a smaller one |
-| red dot in the overlay | overlay lost the WebSocket; it retries automatically |
+| `no speech recognised in N.Ns segment` | music/noise, or wrong `--lang` |
+| nothing in the log at all | VAD never fires — check `--meter` and device |
+| `backlog full` | model too slow; use a smaller one |
+| video will not seek | server ignoring Range requests — use `--serve` |
+| red dot in overlay/reader | lost the WebSocket; it retries automatically |
 
-Whisper likes to hallucinate stock phrases over silence (`Tekstitys: YLE`,
+Whisper hallucinates stock phrases over silence (`Tekstitys: YLE`,
 `Kiitos kun katsoit!`, `Thanks for watching`). Short results matching those are
-filtered out, alongside a no-speech-probability threshold.
+filtered, alongside a no-speech-probability threshold.
 
-## Overlay styling
+## Tests
 
-Append query parameters to the Browser Source URL:
+```bash
+.\.venv\Scripts\python.exe tests\test_smoke.py
+```
 
-| param | example | effect |
-|---|---|---|
-| `size` | `size=52` | font size in px |
-| `lines` | `lines=3` | how many lines stay on screen |
-| `align` | `align=top` | `top`, `center`, default bottom |
-| `fg` | `fg=ffe066` | text colour (hex, no `#`) |
-| `accent` | `accent=7dd3fc` | translation line colour |
-| `box` | `box=0` | remove the dark background pill |
-| `hide` | `hide=0` | never auto-hide |
-| `tr` | `tr=1` | show translation lines (with `--translate`) |
-
-## Text output
-
-`captions.txt` holds the last few lines for an OBS **Text (GDI+)** source with
-*Read from file*, if you would rather avoid browser sources. `captions.log`
-keeps the full timestamped transcript of the session, which doubles as stream
-notes.
-
-## How it works
-
-`livecap.py` pulls 32 ms blocks from a WASAPI device via `soundcard`, tracks a
-running noise floor, and marks blocks as speech when they exceed
-`max(noise × ratio, floor)`. Speech accumulates into a segment; a segment closes
-on `--pause` of trailing silence or at `--max-seg`. Closed segments go to
-faster-whisper on a worker thread and are published as `final`. While a segment
-is still open, idle worker time is spent transcribing the partial buffer and
-publishing lower-confidence `partial` text, so captions appear before the
-speaker finishes. Results are broadcast over WebSocket to `overlay.html` and
-mirrored to disk.
+```bash
+.\.venv\Scripts\python.exe tests\test_subtitle.py
+```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-Uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT) and
-OpenAI's Whisper models.
+MIT — see [LICENSE](LICENSE). Uses
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT) and OpenAI's
+Whisper models. Streaming mode follows the LocalAgreement policy from
+Macháček, Dabre & Bojar, *Turning Whisper into Real-Time Transcription System*
+(2023).
