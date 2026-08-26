@@ -66,6 +66,11 @@ sentence is a plain DOM text node, so Yomitan's popup and its sentence field
 work normally. The timestamp is drawn with CSS rather than text, so it never
 gets absorbed into the sentence you mine.
 
+The reader keeps the whole session, and restores it from `captions.log` if you
+reload, so you can scroll back to something said minutes ago. `A+`/`A−` resize,
+`Follow` toggles auto-scroll (turn it off while working through a line),
+double-click pins a line, `Copy all` grabs the transcript.
+
 ### Changing language and model mid-session
 
 Open `control.html`. Language switches on one click or keys `1`–`9` and applies
