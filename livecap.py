@@ -821,6 +821,26 @@ def selftest(args, seconds):
 
 # ------------------------------------------------------------------ main ----
 
+DEFAULT_MODEL = "small"
+FI_MODEL_DIR = Path("build") / "models" / "fi-small-ct2"
+
+
+def resolve_model(requested, lang, here):
+    """Pick the model, returning (name, message-to-log-or-None).
+
+    With nothing requested, prefer the Finnish fine-tune when it has been built
+    and Finnish is what we are transcribing: same size and speed as small, but
+    better Finnish. An explicit --model always wins, which is why the flag
+    defaults to None rather than to "small".
+    """
+    if requested is not None:
+        return requested, None
+    local = Path(here) / FI_MODEL_DIR
+    if lang == "fi" and (local / "model.bin").is_file():
+        return str(local), "using the Finnish fine-tune (override with --model small)"
+    return DEFAULT_MODEL, None
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         description="Live captions for OBS",
@@ -837,8 +857,11 @@ def build_parser():
     g.add_argument("--verbose", action="store_true", help="log VAD segment decisions")
 
     g = p.add_argument_group("model")
-    g.add_argument("--model", default="small",
-                   help="tiny|base|small|medium|large-v3|large-v3-turbo, or a local CT2 dir")
+    # Default is resolved in main() so an explicit --model small is
+    # distinguishable from not passing --model at all.
+    g.add_argument("--model", default=None,
+                   help="tiny|base|small|medium|large-v3|large-v3-turbo, or a local "
+                        "CT2 dir (default: small, or the Finnish fine-tune if built)")
     g.add_argument("--lang", default="fi", help="fi, ru, ja, es, pt, ... or 'auto'")
     g.add_argument("--langs", default="fi,ru,ja,es,pt,en,auto",
                    help="languages offered as one-click buttons in the control panel")
@@ -890,6 +913,12 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+
+    chosen, why = resolve_model(args.model, args.lang, HERE)
+    args.model = chosen
+    if why:
+        log(why)
+
     args.langs = [s.strip() for s in args.langs.split(",") if s.strip()]
     args.model_choices = [s.strip() for s in args.model_choices.split(",") if s.strip()]
     if args.model not in args.model_choices:

@@ -59,31 +59,47 @@ if ($freeGB) {
 
 if (-not (Test-Path "$venv\Scripts\python.exe")) {
     Write-Host "Creating conversion venv (one-time, ~2.5 GB of torch)..." -ForegroundColor Cyan
+    # pip and venv both write progress to stderr, which would otherwise abort
+    # this script under ErrorActionPreference = Stop. Check exit codes instead.
+    $ErrorActionPreference = "Continue"
     & py -3.11 -m venv $venv
+    if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = "Stop"; throw "could not create venv at $venv" }
     & "$venv\Scripts\python.exe" -m pip install --upgrade pip --quiet
     & "$venv\Scripts\python.exe" -m pip install --index-url https://download.pytorch.org/whl/cpu torch
-    if ($LASTEXITCODE -ne 0) { throw "torch install failed" }
+    if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = "Stop"; throw "torch install failed" }
     & "$venv\Scripts\python.exe" -m pip install transformers ctranslate2 "numpy<3"
-    if ($LASTEXITCODE -ne 0) { throw "transformers/ctranslate2 install failed" }
+    if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = "Stop"; throw "transformers/ctranslate2 install failed" }
+    $ErrorActionPreference = "Stop"
 }
 
 Write-Host "Downloading + converting $src ..." -ForegroundColor Cyan
+
+# Windows PowerShell turns any native stderr output into a terminating error
+# while ErrorActionPreference is Stop, and the HF Hub always warns about
+# unauthenticated requests. Judge these calls by their exit code instead.
+$ErrorActionPreference = "Continue"
+
 & "$venv\Scripts\ct2-transformers-converter.exe" `
     --model $src `
     --output_dir $out `
     --quantization int8 `
     --copy_files preprocessor_config.json tokenizer_config.json special_tokens_map.json `
                  vocab.json merges.txt normalizer.json added_tokens.json
-if ($LASTEXITCODE -ne 0) { throw "conversion failed" }
+if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = "Stop"; throw "conversion failed" }
 
 # faster-whisper wants a real tokenizer.json, otherwise it quietly falls back to
-# the stock openai/whisper-tiny tokenizer.
-$py = @"
-from transformers import WhisperTokenizerFast
-WhisperTokenizerFast.from_pretrained(r'$src').save_pretrained(r'$out')
-print('tokenizer.json written')
-"@
+# the stock openai/whisper-tiny tokenizer and mis-decodes.
+$py = "from transformers import WhisperTokenizerFast" + "`n" +
+      "WhisperTokenizerFast.from_pretrained(r'$src').save_pretrained(r'$out')" + "`n" +
+      "print('tokenizer.json written')"
 $py | & "$venv\Scripts\python.exe" -
+if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = "Stop"; throw "tokenizer export failed" }
+
+$ErrorActionPreference = "Stop"
+if (-not (Test-Path (Join-Path $out "model.bin"))) { throw "no model.bin in $out" }
+if (-not (Test-Path (Join-Path $out "tokenizer.json"))) {
+    Write-Host "WARNING: tokenizer.json missing; faster-whisper will fall back " -ForegroundColor Yellow
+}
 
 Write-Host ""
 Write-Host "Done -> $out" -ForegroundColor Green

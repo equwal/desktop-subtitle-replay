@@ -76,6 +76,34 @@ def test_captions_file_keeps_last_n_lines(tmp_path=None):
             os.chdir(cwd)
 
 
+def test_model_resolution():
+    """An explicit --model must win, even when it equals the default."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        here = Path(d)
+
+        # nothing built yet
+        assert livecap.resolve_model(None, "fi", here)[0] == "small"
+        assert livecap.resolve_model(None, "ru", here)[0] == "small"
+
+        built = here / livecap.FI_MODEL_DIR
+        built.mkdir(parents=True)
+        (built / "model.bin").write_bytes(b"x")
+
+        name, why = livecap.resolve_model(None, "fi", here)
+        assert name == str(built), name
+        assert why and "fine-tune" in why
+
+        # the fine-tune is Finnish-only
+        assert livecap.resolve_model(None, "ru", here)[0] == "small"
+        assert livecap.resolve_model(None, "ja", here)[0] == "small"
+
+        # explicit wins, including the string that happens to be the default
+        assert livecap.resolve_model("small", "fi", here) == ("small", None)
+        assert livecap.resolve_model("large-v3", "fi", here)[0] == "large-v3"
+
+
 def _controller():
     import argparse
 

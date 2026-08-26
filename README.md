@@ -232,12 +232,28 @@ the same speed, but markedly better at Finnish:
 .\get-finnish-model.ps1
 ```
 
-```bash
-.\run.ps1 --model .\build\models\fi-small-ct2
-```
+Once built, `run.ps1` picks it up automatically whenever `--lang fi` and no
+`--model` is given. `--model small` overrides it; other languages ignore it.
 
-Needs ~8 GB free and pulls torch for the one-off conversion; use
-`-BuildRoot D:\somewhere` to build elsewhere, then delete `.venv-convert`.
+Measured on the same 17.6 s Finnish clip:
+
+| model | transcription | RTF |
+|---|---|---|
+| `small` stock | "harv**o**kseltaan kuljetuilla" ✗ | 0.20 |
+| **`fi-small-ct2`** | "harv**a**kseltaan kuljetuilla" ✓ | **0.21** |
+| `large-v3-turbo` | "harvakseltaan kuljetuilla" ✓ | 0.57 |
+
+Turbo-level accuracy at stock-`small` speed — 2.7× faster than turbo for the
+same correct word. That is why it is the live default when present.
+
+**Keep turbo for replay clips, though.** The fine-tune punctuates less
+reliably, running sentences together, and the offline path splits cues on
+sentence boundaries — so turbo yields cleaner subtitle cues and better Anki
+card boundaries. Live, the VAD does the segmenting, so this costs nothing.
+
+The conversion needs ~8 GB free and pulls torch, used only for that one step.
+`-BuildRoot D:\somewhere` builds elsewhere; delete `.venv-convert` under the
+build root afterwards to reclaim about 5 GB.
 
 ## Syncing captions to the picture
 
@@ -258,7 +274,7 @@ If you already run a replay buffer, this costs you nothing.
 | flag | default | effect |
 |---|---|---|
 | `--lang` / `--langs` | `fi` / `fi,ru,ja,es,pt,en,auto` | active language, and the panel's buttons |
-| `--model` | `small` | model name or local CTranslate2 directory |
+| `--model` | `small`, or the Finnish fine-tune if built | model name or local CTranslate2 directory |
 | `--mic` / `--audio-device` | loopback / auto | capture an input device instead |
 | `--pause` | `0.65` | silence that closes a caption; lower is snappier |
 | `--min-speech` | `0.45` | ignore bursts shorter than this |
