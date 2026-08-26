@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<title>Live Captions</title>
+<style>
+  :root {
+    --size: 42px;
+    --fg: #ffffff;
+    --box: rgba(0, 0, 0, .62);
+    --accent: #7dd3fc;
+  }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: "Inter", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  }
+  #stage {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    justify-content: flex-end; align-items: center;
+    padding: 0 4vw 3vh;
+    box-sizing: border-box;
+    gap: .28em;
+    transition: opacity .45s ease;
+  }
+  #stage.idle { opacity: 0; }
+  .line {
+    max-width: 100%;
+    font-size: var(--size);
+    font-weight: 650;
+    line-height: 1.25;
+    letter-spacing: .005em;
+    color: var(--fg);
+    text-align: center;
+    text-wrap: balance;
+    background: var(--box);
+    padding: .16em .5em;
+    border-radius: .22em;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+    text-shadow: 0 2px 6px rgba(0,0,0,.85);
+    animation: rise .22s ease-out;
+  }
+  .line.partial { opacity: .74; }
+  .line.tr {
+    font-size: calc(var(--size) * .62);
+    font-weight: 550;
+    color: var(--accent);
+    opacity: .95;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(.35em); }
+    to   { opacity: 1; transform: none; }
+  }
+  #dot {
+    position: absolute; left: 8px; bottom: 8px;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #ef4444; box-shadow: 0 0 8px #ef4444;
+    opacity: 0; transition: opacity .3s;
+  }
+  #dot.show { opacity: .9; }
+</style>
+</head>
+<body>
+  <div id="stage"><div id="dot" title="disconnected"></div></div>
+
+<script>
+(function () {
+  const q = new URLSearchParams(location.search);
+  const num = (k, d) => { const v = parseFloat(q.get(k)); return isNaN(v) ? d : v; };
+
+  const MAXLINES  = Math.max(1, num("lines", 2));
+  const HIDE_MS   = num("hide", 8) * 1000;
+  const WS_PORT   = num("ws", 8765);
+  const SHOW_TR   = q.get("tr") === "1";
+
+  document.documentElement.style.setProperty("--size", num("size", 42) + "px");
+  if (q.get("fg"))     document.documentElement.style.setProperty("--fg", "#" + q.get("fg"));
+  if (q.get("accent")) document.documentElement.style.setProperty("--accent", "#" + q.get("accent"));
+  if (q.get("box") === "0") document.documentElement.style.setProperty("--box", "transparent");
+  if (q.get("align") === "top")    document.getElementById("stage").style.justifyContent = "flex-start";
+  if (q.get("align") === "center") document.getElementById("stage").style.justifyContent = "center";
+
+  const stage = document.getElementById("stage");
+  const dot   = document.getElementById("dot");
+
+  let finals  = [];      // [{text, tr}]
+  let partial = "";
+  let idleTimer = null;
+
+  function render() {
+    const rows = [];
+    const shown = finals.slice(-MAXLINES + (partial ? 1 : 0));
+    for (const f of shown) {
+      rows.push({ cls: "line", text: f.text });
+      if (SHOW_TR && f.tr) rows.push({ cls: "line tr", text: f.tr });
+    }
+    if (partial) rows.push({ cls: "line partial", text: partial });
+
+    // Rebuild only when content actually changed, so animations do not restart.
+    const key = rows.map(r => r.cls + "|" + r.text).join("\n");
+    if (key === stage.dataset.key) return;
+    stage.dataset.key = key;
+
+    stage.querySelectorAll(".line").forEach(n => n.remove());
+    for (const r of rows) {
+      const el = document.createElement("div");
+      el.className = r.cls;
+      el.textContent = r.text;
+      stage.appendChild(el);
+    }
+  }
+
+  function poke() {
+    stage.classList.remove("idle");
+    clearTimeout(idleTimer);
+    if (HIDE_MS > 0) {
+      idleTimer = setTimeout(() => {
+        stage.classList.add("idle");
+        setTimeout(() => { finals = []; partial = ""; render(); }, 500);
+      }, HIDE_MS);
+    }
+  }
+
+  function connect() {
+    const ws = new WebSocket("ws://127.0.0.1:" + WS_PORT);
+    ws.onopen = () => dot.classList.remove("show");
+    ws.onclose = () => { dot.classList.add("show"); setTimeout(connect, 1500); };
+    ws.onerror = () => ws.close();
+    ws.onmessage = (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type === "partial") {
+        partial = m.text;
+      } else if (m.type === "final") {
+        partial = "";
+        finals.push({ text: m.text, tr: m.tr || "" });
+        if (finals.length > 8) finals.shift();
+      } else if (m.type === "clear") {
+        finals = []; partial = "";
+      }
+      render();
+      poke();
+    };
+  }
+
+  render();
+  connect();
+})();
+</script>
+</body>
+</html>

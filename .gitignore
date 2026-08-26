@@ -1,0 +1,24 @@
+# virtualenvs
+.venv/
+.venv-convert/
+build/
+
+# python
+__pycache__/
+*.py[cod]
+
+# runtime output
+captions.txt
+captions.log
+selftest.wav
+models/
+*.pid
+.livecap.pid
+_live.log
+_live.err
+
+# editors / os
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
