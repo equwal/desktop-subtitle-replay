@@ -140,6 +140,71 @@ def test_esc_strips_tabs_and_newlines():
     assert subtitle.esc("a\tb\nc ") == "a b c"
 
 
+def test_obs_folder_detection_handles_bom_and_output_mode():
+    """OBS writes its ini files with a UTF-8 BOM, which trips configparser."""
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "obs-studio"
+        prof = root / "basic" / "profiles" / "Untitled"
+        prof.mkdir(parents=True)
+        recdir = Path(d) / "recordings"
+        recdir.mkdir()
+        simpledir = Path(d) / "simple"
+        simpledir.mkdir()
+
+        (root / "user.ini").write_text(
+            "﻿[Basic]\nProfile=Untitled\nProfileDir=Untitled\n", encoding="utf-8")
+        (prof / "basic.ini").write_text(
+            "﻿[Output]\nMode=Advanced\n\n"
+            "[SimpleOutput]\nFilePath=%s\n\n"
+            "[AdvOut]\nRecFilePath=%s\n"
+            % (str(simpledir).replace("\\", "\\\\"),
+               str(recdir).replace("\\", "\\\\")),
+            encoding="utf-8")
+
+        old = os.environ.get("APPDATA")
+        os.environ["APPDATA"] = d
+        try:
+            found = subtitle.obs_recording_folder()
+        finally:
+            if old is None:
+                os.environ.pop("APPDATA", None)
+            else:
+                os.environ["APPDATA"] = old
+
+    assert found is not None, "BOM or mode parsing failed"
+    assert Path(found) == recdir, (found, recdir)
+
+
+def test_obs_folder_detection_simple_mode():
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "obs-studio"
+        prof = root / "basic" / "profiles" / "P"
+        prof.mkdir(parents=True)
+        simpledir = Path(d) / "simple"
+        simpledir.mkdir()
+        (root / "user.ini").write_text("﻿[Basic]\nProfileDir=P\n", encoding="utf-8")
+        (prof / "basic.ini").write_text(
+            "﻿[Output]\nMode=Simple\n\n[SimpleOutput]\nFilePath=%s\n"
+            % str(simpledir).replace("\\", "\\\\"), encoding="utf-8")
+
+        old = os.environ.get("APPDATA")
+        os.environ["APPDATA"] = d
+        try:
+            found = subtitle.obs_recording_folder()
+        finally:
+            if old is None:
+                os.environ.pop("APPDATA", None)
+            else:
+                os.environ["APPDATA"] = old
+    assert Path(found) == simpledir, found
+
+
 def test_range_requests_are_served():
     """Without 206 support a browser will not seek in a <video> at all."""
     import http.client

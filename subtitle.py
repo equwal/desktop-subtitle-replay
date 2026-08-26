@@ -503,6 +503,32 @@ class Subtitler:
                                   compute_type=args.compute,
                                   cpu_threads=args.threads, num_workers=1)
         log("model ready in %.1fs" % (time.time() - t0))
+        self._tmodel = None
+        self._tname = None
+
+    def translator(self):
+        """A model that can actually translate.
+
+        large-v3-turbo is a transcription-only fine-tune: asked to translate it
+        returns the source language instead, silently. Fall back to a model
+        that supports the task rather than emitting untranslated text.
+        """
+        from faster_whisper import WhisperModel
+
+        a = self.args
+        name = a.translate_model or a.model
+        if not a.translate_model and "turbo" in a.model.lower():
+            name = "small"
+            log("note: %s cannot translate (transcription-only fine-tune); "
+                "using %r instead - override with --translate-model" % (a.model, name))
+        if name == a.model:
+            return self.model
+        if self._tmodel is None or self._tname != name:
+            log("loading translation model %r ..." % name)
+            self._tmodel = WhisperModel(name, device=a.device, compute_type=a.compute,
+                                        cpu_threads=a.threads, num_workers=1)
+            self._tname = name
+        return self._tmodel
 
     def run(self, path):
         from faster_whisper.audio import decode_audio
@@ -524,7 +550,8 @@ class Subtitler:
             return None
 
         t0 = time.time()
-        segments, info = self.model.transcribe(
+        engine = self.translator() if a.translate else self.model
+        segments, info = engine.transcribe(
             audio,
             language=None if a.lang == "auto" else a.lang,
             task="translate" if a.translate else "transcribe",
@@ -566,25 +593,80 @@ class Subtitler:
         return out
 
     def translate_cues(self, audio, cues):
-        """English for the back of each card, translated per sentence."""
+        """English for the back of each card.
+
+        Translating one short sentence at a time starves Whisper of context and
+        it often just echoes the source language back. Translating the whole
+        clip once and aligning by timestamp is both better and faster.
+        """
+        log("translating for card backs...")
+        try:
+            segs, _ = self.translator().transcribe(
+                audio, language=None if self.args.lang == "auto" else self.args.lang,
+                task="translate", beam_size=self.args.beam,
+                temperature=[0.0, 0.2, 0.4],
+                condition_on_previous_text=True, vad_filter=True)
+            segs = list(segs)
+        except Exception as e:
+            log("translation failed: %s" % e)
+            return [""] * len(cues)
+
         out = []
-        log("translating %d sentences for card backs..." % len(cues))
         for start, end, _ in cues:
-            lo, hi = max(0, int(start * 16000)), min(len(audio), int(end * 16000))
-            clip = audio[lo:hi]
-            if len(clip) < 1600:
-                out.append("")
-                continue
-            try:
-                segs, _ = self.model.transcribe(
-                    clip, language=None if self.args.lang == "auto" else self.args.lang,
-                    task="translate", beam_size=self.args.beam, temperature=0.0,
-                    condition_on_previous_text=False, vad_filter=False,
-                    without_timestamps=True)
-                out.append(" ".join(s.text.strip() for s in segs).strip())
-            except Exception:
-                out.append("")
+            parts = [s.text.strip() for s in segs
+                     if s.start < end - 0.15 and s.end > start + 0.15]
+            out.append(re.sub(r"\s+", " ", " ".join(parts)).strip())
         return out
+
+
+def obs_recording_folder():
+    """Where OBS writes recordings and replay-buffer clips, from its own config.
+
+    Which key holds it depends on the output mode, so read Mode first rather
+    than guessing.
+    """
+    import configparser
+
+    root = Path(os.environ.get("APPDATA", "")) / "obs-studio"
+    if not root.is_dir():
+        return None
+
+    profile_dir = None
+    for name in ("user.ini", "global.ini"):
+        cfg = configparser.RawConfigParser(strict=False)
+        try:
+            cfg.read(root / name, encoding="utf-8-sig")
+            profile_dir = cfg.get("Basic", "ProfileDir", fallback=None) or profile_dir
+        except (configparser.Error, OSError):
+            pass
+
+    profiles = root / "basic" / "profiles"
+    candidates = []
+    if profile_dir and (profiles / profile_dir).is_dir():
+        candidates.append(profiles / profile_dir)
+    if profiles.is_dir():
+        candidates.extend(p for p in profiles.iterdir() if p.is_dir())
+
+    for prof in candidates:
+        cfg = configparser.RawConfigParser(strict=False)
+        try:
+            cfg.read(prof / "basic.ini", encoding="utf-8-sig")
+        except (configparser.Error, OSError):
+            continue
+        mode = (cfg.get("Output", "Mode", fallback="") or "").lower()
+        if mode.startswith("adv"):
+            keys = [("AdvOut", "RecFilePath"), ("AdvOut", "FFFilePath"),
+                    ("SimpleOutput", "FilePath")]
+        else:
+            keys = [("SimpleOutput", "FilePath"), ("AdvOut", "RecFilePath")]
+        for section, key in keys:
+            raw = cfg.get(section, key, fallback=None)
+            if not raw:
+                continue
+            path = Path(raw.replace("\\\\", "\\").strip())
+            if path.is_dir():
+                return path
+    return None
 
 
 class _Limited:
@@ -732,8 +814,9 @@ def main():
         description="Subtitle recordings and replay clips",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("files", nargs="*", help="video/audio files to subtitle")
-    p.add_argument("--watch", metavar="FOLDER",
-                   help="watch a folder and subtitle clips as they appear")
+    p.add_argument("--watch", nargs="?", const="auto", default=None, metavar="FOLDER",
+                   help="watch a folder and subtitle clips as they appear; "
+                        "with no folder, read OBS's own recording path")
     p.add_argument("--poll", type=float, default=3.0, help="watch interval (s)")
 
     p.add_argument("--model", default="large-v3-turbo",
@@ -745,6 +828,9 @@ def main():
     p.add_argument("--beam", type=int, default=5)
     p.add_argument("--translate", action="store_true",
                    help="write English subtitles instead of the original language")
+    p.add_argument("--translate-model", default=None,
+                   help="model used for translation; defaults to --model, except "
+                        "for turbo builds which cannot translate at all")
 
     p.add_argument("--format", default="srt", choices=sorted(WRITERS))
     p.add_argument("--width", type=int, default=42, help="max characters per line")
@@ -781,6 +867,13 @@ def main():
     args = p.parse_args()
     if not args.files and not args.watch:
         p.error("give some files, or --watch a folder")
+
+    if args.watch == "auto":
+        found = obs_recording_folder()
+        if not found:
+            p.error("could not find OBS's recording folder; pass --watch FOLDER")
+        args.watch = str(found)
+        log("OBS records to: %s" % args.watch)
 
     sub = Subtitler(args)
 

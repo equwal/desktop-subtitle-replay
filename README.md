@@ -34,6 +34,16 @@ mistakes. Replay needs accuracy and does not care about time.
 .\setup.ps1
 ```
 
+## Start everything
+
+```bash
+.\start.ps1
+```
+
+Runs both halves: live captions, plus a watcher that subtitles every replay clip
+OBS saves and serves it as a mining page. `-Lang ru`, `-LiveOnly`, `-ReplayOnly`
+and `-Model` adjust it. The two halves are also usable separately, below.
+
 ## Live captions
 
 ```bash
@@ -102,10 +112,12 @@ Writes `clip.srt` and `clip.html` next to the clip. The HTML page is the mining
 surface: video on the left, every sentence listed as selectable text, click to
 seek, `Loop cue` to repeat a line while you work it out.
 
-Watch your replay folder and subtitle clips automatically as OBS saves them:
+Watch your replay folder and subtitle clips automatically as OBS saves them.
+With no folder given, it reads OBS's own config to find where recordings go
+(honouring Simple vs Advanced output mode):
 
 ```bash
-.\.venv\Scripts\python.exe subtitle.py --watch "C:\Users\you\Videos" --serve
+.\.venv\Scripts\python.exe subtitle.py --watch --serve
 ```
 
 `--serve` matters more than it looks. Opening `clip.html` from `file://`
@@ -131,6 +143,14 @@ its own, which is usually what you want.
 
 Screenshots need Pillow (`pip install pillow`); without it the image column is
 left empty and everything else still works.
+
+**Two things about `--anki-translate`.** First, `large-v3-turbo` is a
+transcription-only fine-tune and *cannot translate* — asked to, it silently
+returns the source language. Translation is therefore routed to `small` unless
+you set `--translate-model`. Second, Whisper's Finnish→English is genuinely
+weak: it rendered *"sen verran syrjäisillä seuduilla"* as "the lake of Sennvera".
+For learning, Yomitan's dictionary lookups are far more trustworthy than a
+machine-translated card back.
 
 ## Speed, honestly
 
