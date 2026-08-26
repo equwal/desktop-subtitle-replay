@@ -215,6 +215,14 @@ class Bus:
     def attach(self, loop):
         self.loop = loop
 
+    def mark_session(self):
+        """A marker so the reader can show this session's history after a reload."""
+        try:
+            with self.logf.open("a", encoding="utf-8") as fh:
+                fh.write("=== session %s ===\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+        except OSError as e:
+            log("could not write captions.log:", e)
+
     def publish(self, msg):
         if msg["type"] == "final":
             self.history.append(msg)
@@ -899,6 +907,7 @@ def main():
     stop_ev = threading.Event()
     jobs = queue.Queue(maxsize=3)
 
+    bus.mark_session()
     ctl = Controller(args, bus)
     tr = Transcriber(args, bus)
     ctl.tr = tr

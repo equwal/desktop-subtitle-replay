@@ -99,6 +99,7 @@
   const jump = document.getElementById("jump");
   let follow = true;
   let partialEl = null;
+  const historyTail = new Set();
   let size = parseInt(localStorage.getItem("livecap.size") || q.get("size") || "30", 10);
 
   function applySize() {
@@ -155,6 +156,12 @@
   }
 
   function onFinal(m) {
+    // The server replays its last few finals on connect; those may already be
+    // on screen from captions.log. Drop only that overlap, once.
+    if (historyTail.has(m.text)) {
+      historyTail.delete(m.text);
+      return;
+    }
     clearEmpty();
     if (partialEl) { partialEl.remove(); partialEl = null; }
     const wasBottom = atBottom();
@@ -199,6 +206,44 @@
   };
   jump.onclick = scrollDown;
 
+  // Reloading the page would otherwise lose the session's scrollback, which is
+  // exactly what you want when going back to something said minutes ago.
+  async function loadHistory() {
+    try {
+      const res = await fetch("captions.log", { cache: "no-store" });
+      if (!res.ok) return;
+      // The log is written with CRLF on Windows; a stray \r would both break
+      // the de-duplication below and end up inside mined sentences.
+      const lines = (await res.text()).split(/\r?\n/);
+      let from = 0;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].startsWith("=== session ")) { from = i + 1; break; }
+      }
+      const rows = lines.slice(from).filter((l) => l.trim() && !l.startsWith("==="));
+      if (!rows.length) return;
+      clearEmpty();
+      for (const row of rows.slice(-400)) {
+        const parts = row.split("\t").map((p) => p.trim());
+        if (parts.length < 2 || !parts[1]) continue;
+        const trIdx = parts.findIndex((p) => p.startsWith("|| "));
+        const m = {
+          text: parts[1],
+          tr: trIdx > 0 ? parts[trIdx].slice(3) : "",
+          ts: null
+        };
+        const el = makeLine(m, false);
+        el.dataset.time = (parts[0].split(" ")[1] || parts[0]);
+        log.appendChild(el);
+        historyTail.add(m.text);
+      }
+      // Only the newest few can collide with the server's replay buffer.
+      const keep = [...historyTail].slice(-6);
+      historyTail.clear();
+      keep.forEach((t) => historyTail.add(t));
+      scrollDown();
+    } catch (e) { /* history is a nicety, never block the live feed */ }
+  }
+
   function connect() {
     const ws = new WebSocket("ws://127.0.0.1:" + WS_PORT);
     const conn = document.getElementById("conn");
@@ -225,7 +270,7 @@
     };
   }
 
-  connect();
+  loadHistory().then(connect);
 })();
 </script>
 </body>
