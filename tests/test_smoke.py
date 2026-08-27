@@ -112,6 +112,123 @@ def test_is_repetitive():
     assert not livecap.is_repetitive("hi")
 
 
+LANGS = ["fi", "ru", "ja", "es", "pt", "en"]
+
+
+def _det(**kw):
+    return livecap.LanguageDetector(LANGS + ["auto"], **kw)
+
+
+def test_detector_ignores_languages_not_in_use():
+    """An outsider may win outright and still not be the answer.
+
+    But only when enough evidence lands inside the set - if the audio is
+    overwhelmingly a language not in use, the honest answer is "no idea",
+    not the best of the leftovers.
+    """
+    d = _det()
+    # de leads, yet fi holds the majority of the mass that is actually usable
+    assert d.observe([("de", 0.3), ("fi", 0.55), ("ja", 0.05)], duration=4) == "fi"
+
+    d2 = _det()
+    # here de dominates and almost nothing is in the set: refuse to guess
+    assert d2.observe([("de", 0.7), ("fi", 0.2), ("ja", 0.05)], duration=4) is None
+
+
+def test_detector_folds_close_relatives():
+    """Estonian mass belongs to Finnish; Ukrainian to Russian; Galician to Portuguese."""
+    d = _det()
+    folded, mass = d.fold([("et", 0.5), ("fi", 0.3), ("ru", 0.1)])
+    assert folded["fi"] == 0.8, folded
+    assert 0.89 < mass < 0.91, mass
+
+    folded, _ = d.fold([("uk", 0.4), ("bg", 0.2), ("ru", 0.1)])
+    assert abs(folded["ru"] - 0.7) < 1e-9, folded
+
+    folded, _ = d.fold([("gl", 0.6), ("es", 0.2)])
+    assert abs(folded["pt"] - 0.6) < 1e-9 and abs(folded["es"] - 0.2) < 1e-9, folded
+
+
+def test_detector_splits_do_not_lose_to_an_outsider():
+    """fi+et together beat ja, even though ja beats each individually."""
+    d = _det()
+    assert d.observe([("fi", 0.3), ("et", 0.3), ("ja", 0.35)], duration=4) == "fi"
+
+
+def test_detector_does_not_flap_on_one_odd_segment():
+    d = _det(hold=2)
+    for _ in range(4):
+        d.observe([("ja", 0.95)], duration=4)
+    assert d.current == "ja"
+    # a single confident Spanish reading must not switch it
+    assert d.observe([("es", 0.95)], duration=4) == "ja"
+
+
+def test_detector_switches_when_change_is_sustained():
+    d = _det(hold=2)
+    for _ in range(4):
+        d.observe([("ja", 0.95)], duration=4)
+    assert d.current == "ja"
+    d.observe([("ru", 0.95)], duration=4)
+    d.observe([("ru", 0.95)], duration=4)
+    for _ in range(3):
+        d.observe([("ru", 0.95)], duration=4)
+    assert d.current == "ru", d.scores
+
+
+def test_detector_weights_short_audio_less():
+    d = _det()
+    for _ in range(3):
+        d.observe([("en", 0.9)], duration=5)
+    strong = dict(d.scores)
+    d2 = _det()
+    for _ in range(3):
+        d2.observe([("en", 0.9)], duration=0.5)
+    assert strong["en"] > d2.scores["en"]
+
+
+def test_detector_reset_and_confidence():
+    d = _det()
+    d.observe([("ja", 0.99)], duration=4)
+    assert d.current == "ja" and d.confidence() > 0.9
+    d.reset()
+    assert d.current is None and d.confidence() == 0.0
+    assert all(v == 0.0 for v in d.scores.values())
+
+
+def test_detector_defers_on_an_ambiguous_first_reading():
+    """Restricting the set inflates confidence; mass outside it is the tell.
+
+    "en 0.38, ko 0.25, nn 0.10" looks like a commanding en once ko and nn are
+    dropped, but only 0.38 of the mass was ever inside the allowed set.
+    """
+    d = _det()
+    assert d.observe([("en", 0.38), ("ko", 0.25), ("nn", 0.10)], duration=2) is None
+    assert d.current is None
+    # a genuinely confident reading is adopted immediately afterwards
+    assert d.observe([("fi", 0.96), ("nn", 0.02), ("en", 0.01)], duration=4) == "fi"
+
+
+def test_detector_adopts_a_confident_first_reading():
+    d = _det()
+    assert d.observe([("ja", 0.93), ("zh", 0.04)], duration=4) == "ja"
+
+
+def test_detector_low_mass_never_locks_in():
+    d = _det()
+    for _ in range(5):
+        d.observe([("de", 0.6), ("nl", 0.3), ("en", 0.05)], duration=4)
+    assert d.current is None, d.scores
+
+
+def test_detector_handles_empty_and_unusable_input():
+    d = _det()
+    assert d.observe([], duration=4) is None
+    assert d.observe([("de", 0.9), ("zh", 0.1)], duration=4) is None
+    d.observe([("fi", 0.9)], duration=4)
+    assert d.observe([("de", 1.0)], duration=4) == "fi"   # keeps the last good one
+
+
 def test_model_resolution():
     """An explicit --model must win, even when it equals the default."""
     import tempfile

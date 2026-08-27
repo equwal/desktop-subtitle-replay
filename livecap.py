@@ -323,11 +323,13 @@ class Controller:
         self.tr = None                      # set once the Transcriber exists
         self.cmds = queue.Queue()           # model swaps run on the worker thread
         self.loading = False
+        self.detected = None                # what 'auto' has settled on
 
     def status(self):
         return {
             "type": "status",
             "lang": self.args.lang,
+            "detected": self.detected,
             "model": self.args.model,
             "loading": self.loading,
             "translate": bool(self.args.translate),
@@ -352,8 +354,12 @@ class Controller:
                 return
             if val != self.args.lang:
                 self.args.lang = val
+                self.detected = None
                 if self.tr is not None:
                     self.tr.context = ""        # old-language prompt would poison it
+                    # Evidence gathered for a different language is worthless.
+                    self.tr.detector.reset()
+                    self.tr._last_detect = 0.0
                 log("language -> %s" % val)
                 self.bus.publish({"type": "clear"})
             self.push_status()
@@ -386,6 +392,105 @@ class Controller:
 
         elif cmd == "status":
             self.push_status()
+
+
+# Whisper spreads probability across close relatives. When the relative is not
+# one of the languages in use, its mass belongs to the neighbour that is -
+# otherwise a Finnish clip can lose to Finnish-plus-Estonian splitting the vote.
+CONFUSABLE = {
+    "et": "fi",                                          # Estonian
+    "uk": "ru", "be": "ru", "bg": "ru", "mk": "ru",      # Cyrillic Slavic
+    "sr": "ru", "kk": "ru",
+    "gl": "pt",                                          # Galician leans Portuguese
+    "ca": "es", "oc": "es", "an": "es",                  # Iberian Romance
+    "cy": "en", "gd": "en",                              # frequent English mis-picks
+}
+
+
+class LanguageDetector:
+    """Language identification restricted to the languages actually in use.
+
+    Three things make Whisper's own per-window detection unreliable here:
+    it may answer with any of 99 languages, it decides afresh every call so the
+    answer flaps mid-conversation, and short utterances carry little evidence.
+
+    So: fold the distribution onto the allowed set, accumulate it over time with
+    a decay, and only switch when a challenger leads by a margin for several
+    observations in a row.
+    """
+
+    def __init__(self, allowed, margin=1.3, hold=2, decay=0.55, min_audio=1.6,
+                 min_mass=0.5, min_confidence=0.55):
+        self.allowed = [c for c in allowed if c != "auto"] or ["en"]
+        self.margin = margin
+        self.hold = hold
+        self.decay = decay
+        self.min_audio = min_audio
+        # Restricting the distribution deletes the competitors, which inflates
+        # confidence: "en 0.38, ko 0.25, nn 0.10" becomes a commanding en 0.85.
+        # How much mass landed inside the allowed set is the honest signal of
+        # whether this audio is any of these languages at all.
+        self.min_mass = min_mass
+        self.min_confidence = min_confidence
+        self.scores = {c: 0.0 for c in self.allowed}
+        self.current = None
+        self._pending = None
+        self._pending_n = 0
+
+    def reset(self):
+        self.scores = {c: 0.0 for c in self.allowed}
+        self.current = None
+        self._pending, self._pending_n = None, 0
+
+    def fold(self, probs):
+        """Restrict the distribution to the allowed set, returning (dict, mass)."""
+        out = {c: 0.0 for c in self.allowed}
+        for lang, p in probs:
+            target = lang if lang in out else CONFUSABLE.get(lang)
+            if target in out:
+                out[target] += p
+        return out, sum(out.values())
+
+    def confidence(self):
+        total = sum(self.scores.values())
+        if total <= 0 or self.current is None:
+            return 0.0
+        return self.scores[self.current] / total
+
+    def observe(self, probs, duration=3.0):
+        """Feed one detection result; returns the language to actually use."""
+        folded, mass = self.fold(probs)
+        if mass <= 0:
+            return self.current
+
+        # Longer audio is better evidence than a two-word utterance, and mass
+        # outside the allowed set means this probably is not one of them.
+        reliability = min(1.0, mass / self.min_mass) if self.min_mass > 0 else 1.0
+        weight = max(0.05, min(1.0, duration / 3.0)) * reliability
+        for code in self.scores:
+            self.scores[code] = (self.scores[code] * self.decay
+                                 + (folded[code] / mass) * weight)
+
+        best = max(self.scores, key=lambda c: self.scores[c])
+        if self.current is None:
+            # Adopting a language from one ambiguous reading is how a whole
+            # session ends up locked to the wrong one.
+            total = sum(self.scores.values())
+            share = self.scores[best] / total if total > 0 else 0.0
+            if mass >= self.min_mass and share >= self.min_confidence:
+                self.current = best
+            return self.current
+
+        leader, held = self.scores[best], self.scores[self.current]
+        if best != self.current and leader > held * self.margin:
+            self._pending_n = self._pending_n + 1 if self._pending == best else 1
+            self._pending = best
+            if self._pending_n >= self.hold:
+                self.current = best
+                self._pending, self._pending_n = None, 0
+        else:
+            self._pending, self._pending_n = None, 0
+        return self.current
 
 
 def valid_language(code):
@@ -469,6 +574,42 @@ class Transcriber:
         log("model ready in %.1fs" % (time.time() - t0))
         self.context = ""
         self.busy = threading.Event()
+        self.detector = LanguageDetector(
+            args.langs, margin=args.detect_margin, hold=args.detect_hold,
+            min_audio=args.detect_min_audio)
+        self._last_detect = 0.0
+
+    def pick_language(self, audio, duration, ctl=None):
+        """Resolve 'auto' to one of the configured languages.
+
+        Detection runs on a schedule rather than every segment: it costs an
+        encoder pass, and once the answer is settled re-deciding constantly is
+        what makes it flap. Passing an explicit language into transcribe() also
+        skips Whisper's own internal detection, so this is close to free.
+        """
+        a = self.args
+        if a.lang != "auto":
+            return a.lang
+
+        due = (self.detector.current is None
+               or time.time() - self._last_detect >= a.detect_every)
+        if due and duration >= self.detector.min_audio:
+            self._last_detect = time.time()
+            try:
+                _, _, probs = self.model.detect_language(audio)
+            except Exception as e:
+                log("language detection failed:", repr(e))
+                return self.detector.current
+            before = self.detector.current
+            now = self.detector.observe(probs, duration)
+            if now != before:
+                log("detected language: %s (confidence %.2f)"
+                    % (now, self.detector.confidence()))
+                self.context = ""          # prompt from another language misleads
+                if ctl is not None:
+                    ctl.detected = now
+                    ctl.push_status()
+        return self.detector.current
 
     def reload(self, name, ctl):
         """Swap the model in place. Runs on the worker thread."""
@@ -495,11 +636,12 @@ class Transcriber:
         ctl.push_status()
         log("model -> %s (%.1fs)" % (name, time.time() - t0))
 
-    def run(self, audio, final):
+    def run(self, audio, final, language=None):
         a = self.args
+        lang = language or (None if a.lang == "auto" else a.lang)
         segs, info = self.model.transcribe(
             audio,
-            language=None if a.lang == "auto" else a.lang,
+            language=lang,
             task="transcribe",
             beam_size=a.beam if final else 1,
             temperature=0.0,
@@ -556,7 +698,9 @@ class Transcriber:
                 t0 = time.time()
                 a16 = to_whisper(audio, sr)
                 dur = len(a16) / TARGET_SR
-                text, nsp, _ = self.run(a16, final=(kind == "final"))
+                lang = (self.pick_language(a16, dur, ctl) if kind == "final"
+                        else self.detector.current)
+                text, nsp, _ = self.run(a16, final=(kind == "final"), language=lang)
                 if not text:
                     if kind == "final":
                         log("no speech recognised in %.1fs segment "
@@ -942,6 +1086,14 @@ def build_parser():
     g.add_argument("--compute", default="int8", help="int8|int8_float32|float32|float16")
     g.add_argument("--threads", type=int, default=max(2, (os.cpu_count() or 8) - 2))
     g.add_argument("--beam", type=int, default=5)
+    g.add_argument("--detect-every", type=float, default=6.0,
+                   help="seconds between language-detection passes when --lang auto")
+    g.add_argument("--detect-min-audio", type=float, default=1.6,
+                   help="skip detection on segments shorter than this")
+    g.add_argument("--detect-margin", type=float, default=1.3,
+                   help="how far a new language must lead before switching")
+    g.add_argument("--detect-hold", type=int, default=2,
+                   help="consecutive detections needed before switching")
     g.add_argument("--repetition-penalty", type=float, default=1.15,
                    help="discourage Whisper from looping on a phrase; "
                         "Japanese and Chinese need this more than European "

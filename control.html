@@ -154,8 +154,13 @@
     const dot = document.createElement("span");
     dot.className = "dot " + (state.loading ? "busy" : "up");
     el("conn").appendChild(dot);
-    el("conn").appendChild(document.createTextNode(
-      (NAMES[state.lang] || state.lang) + " · " + state.model));
+    let label = NAMES[state.lang] || state.lang;
+    if (state.lang === "auto") {
+      label += state.detected
+        ? " → " + (NAMES[state.detected] || state.detected)
+        : " (listening…)";
+    }
+    el("conn").appendChild(document.createTextNode(label + " · " + state.model));
   }
 
   function renderFeed() {

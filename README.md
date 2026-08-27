@@ -86,9 +86,45 @@ for a few seconds. Defaults cover `fi,ru,ja,es,pt,en,auto`:
 toward standard orthography and will not reliably reproduce regional slang.
 Brazilian and European Portuguese are both `pt`.
 
-**`auto` re-detects per segment**, which flips on short or noisy audio and can
-mislabel mid-sentence. For deliberate language changes the `1`–`9` keys are far
-more reliable.
+### How `auto` decides
+
+Whisper's own detection answers with any of 99 languages, decides afresh on
+every call, and has little to go on in a two-word utterance. `auto` here is
+built on top of it and constrained to the languages you actually configured:
+
+1. **Restricted to `--langs`.** A Finnish clip cannot come back as Estonian.
+2. **Close relatives are folded in.** Whisper splits mass between neighbours,
+   so Estonian counts toward Finnish, Ukrainian and Bulgarian toward Russian,
+   Galician toward Portuguese, Catalan toward Spanish. Otherwise a clip can
+   lose because `fi` and `et` split the vote and a third language wins.
+3. **Reliability gate.** Restricting the set deletes the competitors and so
+   inflates confidence — `en 0.38, ko 0.25, nn 0.10` looks like a commanding
+   `en` once `ko` and `nn` are dropped. If too little mass lands inside your
+   set, it declines to guess and lets Whisper handle that one segment.
+4. **Evidence accumulates over time**, weighted by segment length, instead of
+   each segment deciding alone.
+5. **Hysteresis.** A new language must lead by a margin for several
+   consecutive detections before it takes over, so one odd segment cannot
+   flip the caption language mid-conversation.
+
+Detection runs on a schedule (`--detect-every`, default 6 s) rather than every
+segment. It costs an encoder pass, but passing an explicit language into
+Whisper skips its *internal* detection, so the steady-state cost is roughly
+neutral.
+
+Measured on a Finnish clip in short windows, plain Whisper committed to `en`
+on an ambiguous leading window; the detector declined to guess there and then
+held `fi` across every remaining window.
+
+| flag | default | effect |
+|---|---|---|
+| `--detect-every` | `6.0` | seconds between detection passes |
+| `--detect-min-audio` | `1.6` | skip detection on shorter segments |
+| `--detect-margin` | `1.3` | how far a challenger must lead to switch |
+| `--detect-hold` | `2` | consecutive detections before switching |
+
+The control panel shows `auto → ja` once it settles. Pinning with `1`–`9` is
+still the most reliable option when you already know the language.
 
 ### Choosing what gets captioned
 
