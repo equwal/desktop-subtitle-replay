@@ -76,6 +76,42 @@ def test_captions_file_keeps_last_n_lines(tmp_path=None):
             os.chdir(cwd)
 
 
+def test_collapse_repeated_chunks():
+    """Consecutive segments repeating the same sentence collapse to one."""
+    one = "私はそれを見つけたことがありました"
+    assert livecap.collapse_repeats(" ".join([one] * 4)) == one
+    assert livecap.collapse_repeats(one) == one
+
+
+def test_collapse_repeated_unit_inside_a_segment():
+    """The loop need not start at the beginning of the string."""
+    assert livecap.collapse_repeats("この日の日の日の日") == "この日"
+    assert livecap.collapse_repeats("abababab") == "ab"
+    assert livecap.collapse_repeats("xabababab") == "xab"
+
+
+def test_short_words_may_repeat_twice():
+    """Doubling is normal speech; a longer run is Whisper looping."""
+    assert livecap.collapse_repeats("very very good") == "very very good"
+    assert livecap.collapse_repeats("no no no no no") == "no no"
+
+
+def test_collapse_leaves_normal_text_alone():
+    for text in ["今日はとてもいい天気ですね。",
+                 "Kyllä se tästä, kyllä se tästä.",
+                 "Привет, как дела сегодня?",
+                 "the cat sat on the mat"]:
+        assert livecap.collapse_repeats(text) == " ".join(text.split()), text
+
+
+def test_is_repetitive():
+    one = "私はそれを見つけたことがありました"
+    assert livecap.is_repetitive(" ".join([one] * 4))
+    assert not livecap.is_repetitive(one)
+    assert not livecap.is_repetitive("Kyllä se tästä, kyllä se tästä.")
+    assert not livecap.is_repetitive("hi")
+
+
 def test_model_resolution():
     """An explicit --model must win, even when it equals the default."""
     import tempfile

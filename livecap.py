@@ -400,6 +400,53 @@ def valid_language(code):
         return bool(re.fullmatch(r"[a-z]{2,3}", code))
 
 
+def collapse_looping_tail(s, min_reps=3):
+    """Trim a unit that repeats to the end of the string.
+
+    The loop does not necessarily start at the beginning - "この日の日の日の日"
+    is "こ" followed by "の日" four times - so anchor the search at the end.
+    """
+    n = len(s)
+    for p in range(1, n // min_reps + 1):
+        unit = s[n - p:]
+        k = 0
+        while (k + 1) * p <= n and s[n - (k + 1) * p: n - k * p] == unit:
+            k += 1
+        if k >= min_reps:
+            return s[: n - (k - 1) * p]
+    return s
+
+
+def collapse_repeats(text):
+    """Whisper degenerates into repeating a phrase; keep one copy.
+
+    Two shapes show up: identical chunks joined from consecutive segments
+    ("A A A"), and a unit looped inside one chunk ("この日の日の日").
+    """
+    s = " ".join(text.split())
+    if not s:
+        return s
+
+    out = []
+    for c in s.split(" "):
+        # Only whole phrases collapse on a single repeat; short words legitimately
+        # repeat ("very very good"), so those need three in a row.
+        run = 1 if len(c) >= 8 else 2
+        if len(out) >= run and all(x == c for x in out[-run:]):
+            continue
+        out.append(c)
+
+    return " ".join(collapse_looping_tail(c) for c in out)
+
+
+def is_repetitive(text):
+    """True when a caption is mostly one phrase repeated."""
+    s = " ".join(text.split())
+    if len(s) < 8:
+        return False
+    return len(collapse_repeats(s)) * 2 < len(s)
+
+
 def looks_hallucinated(text):
     t = text.strip().lower()
     if len(t) > 40:
@@ -461,6 +508,7 @@ class Transcriber:
             vad_filter=final,
             no_speech_threshold=0.6,
             log_prob_threshold=-1.0,
+            repetition_penalty=a.repetition_penalty,
             without_timestamps=True,
         )
         parts, nsp = [], []
@@ -518,8 +566,14 @@ class Transcriber:
                     if nsp > 0.75 or looks_hallucinated(text):
                         log("dropped (no_speech=%.2f): %r" % (nsp, text))
                         continue
+                    looped = is_repetitive(text)
+                    text = collapse_repeats(text)
+                    if looped:
+                        # Feeding a looped caption back as the prompt is how the
+                        # loop sustains itself across segments.
+                        self.context = ""
                     tr = self.translate(a16) if self.args.translate else ""
-                    if not self.args.no_context:
+                    if not self.args.no_context and not looped:
                         self.context = (self.context + " " + text)[-220:]
                     took = time.time() - t0
                     log("FINAL %4.1fs audio in %4.1fs (rtf %.2f)  %s"
@@ -888,6 +942,10 @@ def build_parser():
     g.add_argument("--compute", default="int8", help="int8|int8_float32|float32|float16")
     g.add_argument("--threads", type=int, default=max(2, (os.cpu_count() or 8) - 2))
     g.add_argument("--beam", type=int, default=5)
+    g.add_argument("--repetition-penalty", type=float, default=1.15,
+                   help="discourage Whisper from looping on a phrase; "
+                        "Japanese and Chinese need this more than European "
+                        "languages. 1.0 disables it")
     g.add_argument("--translate", action="store_true",
                    help="also emit an English translation line")
     g.add_argument("--no-context", action="store_true",
