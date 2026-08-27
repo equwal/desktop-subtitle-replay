@@ -1,378 +1,90 @@
 # desktop-subtitle-replay
 
-Live subtitles for anything playing on your desktop, plus a mining workflow for
-the clips you save afterwards. Built for language learning: understand it now,
-turn it into Anki cards later.
+**Live subtitles for anything playing on your screen — then turn what you just heard into Anki cards.**
 
-Runs entirely on your machine. No API keys, no cloud, no internet after the
-model downloads.
+Watch a stream in Finnish. Read along as it happens. Hit your replay buffer on
+the sentence you didn't catch, and get it back as a clip with hoverable
+subtitles you can mine with [Yomitan](https://yomitan.wiki/).
 
-```
-                    ┌─► OBS overlay        (captions on the stream)
-desktop audio ──────┼─► reader.html        (selectable text — Yomitan mines it)
-   (live)           └─► captions.txt/log   (plain text)
+Everything runs on your machine. No API keys, no cloud, no upload.
 
-replay clip ────────┬─► clip.srt           (subtitles)
-   (offline)        ├─► clip.html          (video + hoverable synced subs)
-                    └─► clip.anki.tsv      (one card per sentence + audio)
-```
+---
 
-Two halves, because they want opposite things. Live needs speed and accepts
-mistakes. Replay needs accuracy and does not care about time.
+## Why this exists
 
-## Requirements
+Subtitle tools caption *your* speech for *your* viewers. This does the
+opposite: it captions what you're listening to, so you can follow along in a
+language you're still learning — and keeps the audio so you can study it later.
 
-- Windows 10/11
-- Python 3.9–3.12 (3.11 recommended)
-- OBS Studio 28+ (only for the live overlay)
-- ~2 GB disk for the model cache
-- A GPU is *not* required, but it changes what is possible — see below
+**Live and replay want opposite things**, so they get different engines:
 
-## Install
+|  | live | replay |
+|---|---|---|
+| needs | speed | accuracy |
+| model | `small` (~0.2 RTF) | `large-v3-turbo` |
+| output | OBS overlay + reader page | `.srt`, mining page, Anki cards |
+
+The live model transcribed *"harvokseltaan"*. The replay model gets
+*"harvakseltaan"* — the actual word. You want both.
+
+## Mining is the point
+
+Yomitan reads **DOM text**, not pixels. So subtitles are rendered as real,
+selectable text — each sentence its own text node, timestamps drawn in CSS so
+they never contaminate the sentence you mine. Hover a word, get a definition,
+make a card, with the sentence context captured automatically.
+
+That works on the live reader *and* on every replay clip.
+
+## Start
 
 ```bash
 .\setup.ps1
 ```
 
-## Start everything
-
 ```bash
 .\start.ps1
 ```
 
-Runs both halves: live captions, plus a watcher that subtitles every replay clip
-OBS saves and serves it as a mining page. `-Lang ru`, `-LiveOnly`, `-ReplayOnly`
-and `-Model` adjust it. The two halves are also usable separately, below.
+That's it. Three URLs get printed:
 
-## Live captions
+- **reader** — open in the browser where Yomitan lives
+- **overlay** — paste into an OBS Browser Source
+- **control** — switch language with `1`–`9`, swap models, no restart
 
-```bash
-.\run.ps1
-```
+Save a replay in OBS and its mining page appears automatically.
 
-Prints three URLs:
+## Languages
 
-| page | where it goes |
-|---|---|
-| `overlay.html` | OBS Browser Source — captions burned into the stream |
-| `reader.html` | **your real browser** — selectable text for Yomitan |
-| `control.html` | language and model switching while running |
-
-For OBS: **+ → Browser**, paste the overlay URL, **1920 × 1080**, untick
-**Shutdown source when not visible**.
-
-For mining: open `reader.html` in the browser where Yomitan is installed. Each
-sentence is a plain DOM text node, so Yomitan's popup and its sentence field
-work normally. The timestamp is drawn with CSS rather than text, so it never
-gets absorbed into the sentence you mine.
-
-The reader keeps the whole session, and restores it from `captions.log` if you
-reload, so you can scroll back to something said minutes ago. `A+`/`A−` resize,
-`Follow` toggles auto-scroll (turn it off while working through a line),
-double-click pins a line, `Copy all` grabs the transcript.
-
-### Changing language and model mid-session
-
-Open `control.html`. Language switches on one click or keys `1`–`9` and applies
-to the next sentence — no reload. Model switching reloads and pauses captions
-for a few seconds. Defaults cover `fi,ru,ja,es,pt,en,auto`:
+Any Whisper language. Automatic detection is constrained to the ones you
+actually use, so a Finnish clip can't come back as Estonian:
 
 ```bash
-.\run.ps1 --langs fi,ru,ja,es,pt,en,auto --lang fi
-```
-
-**Whisper has no regional variants.** Argentine Spanish is `es`; there is no
-`es-AR`. It handles Rioplatense pronunciation and *voseo*, but normalises
-toward standard orthography and will not reliably reproduce regional slang.
-Brazilian and European Portuguese are both `pt`.
-
-### How `auto` decides
-
-Whisper's own detection answers with any of 99 languages, decides afresh on
-every call, and has little to go on in a two-word utterance. `auto` here is
-built on top of it and constrained to the languages you actually configured:
-
-1. **Restricted to `--langs`.** A Finnish clip cannot come back as Estonian.
-2. **Close relatives are folded in.** Whisper splits mass between neighbours,
-   so Estonian counts toward Finnish, Ukrainian and Bulgarian toward Russian,
-   Galician toward Portuguese, Catalan toward Spanish. Otherwise a clip can
-   lose because `fi` and `et` split the vote and a third language wins.
-3. **Reliability gate.** Restricting the set deletes the competitors and so
-   inflates confidence — `en 0.38, ko 0.25, nn 0.10` looks like a commanding
-   `en` once `ko` and `nn` are dropped. If too little mass lands inside your
-   set, it declines to guess and lets Whisper handle that one segment.
-4. **Evidence accumulates over time**, weighted by segment length, instead of
-   each segment deciding alone.
-5. **Hysteresis.** A new language must lead by a margin for several
-   consecutive detections before it takes over, so one odd segment cannot
-   flip the caption language mid-conversation.
-
-Detection runs on a schedule (`--detect-every`, default 6 s) rather than every
-segment. It costs an encoder pass, but passing an explicit language into
-Whisper skips its *internal* detection, so the steady-state cost is roughly
-neutral.
-
-Measured on a Finnish clip in short windows, plain Whisper committed to `en`
-on an ambiguous leading window; the detector declined to guess there and then
-held `fi` across every remaining window.
-
-| flag | default | effect |
-|---|---|---|
-| `--detect-every` | `6.0` | seconds between detection passes |
-| `--detect-min-audio` | `1.6` | skip detection on shorter segments |
-| `--detect-margin` | `1.3` | how far a challenger must lead to switch |
-| `--detect-hold` | `2` | consecutive detections before switching |
-
-The control panel shows `auto → ja` once it settles. Pinning with `1`–`9` is
-still the most reliable option when you already know the language.
-
-### Choosing what gets captioned
-
-Default loopback captures everything your speakers play. Your own microphone is
-*not* included unless OBS monitors it, and music gets transcribed too.
-
-With [VB-Audio Virtual Cable](https://vb-audio.com/Cable/), send only what you
-want captioned:
-
-1. OBS → **Settings → Audio → Advanced → Monitoring Device** = `CABLE Input`
-2. Audio Mixer → gear on each source → **Advanced Audio Properties** →
-   **Audio Monitoring** = **Monitor and Output**
-3. Leave music and alerts on **Monitor Off**
-
-```bash
-.\run.ps1 --mic --audio-device CABLE
-```
-
-## Subtitling replay clips
-
-```bash
-.\.venv\Scripts\python.exe subtitle.py clip.mp4
-```
-
-Writes `clip.srt` and `clip.html` next to the clip. The HTML page is the mining
-surface: video on the left, every sentence listed as selectable text, click to
-seek, `Loop cue` to repeat a line while you work it out.
-
-Watch your replay folder and subtitle clips automatically as OBS saves them.
-With no folder given, it reads OBS's own config to find where recordings go
-(honouring Simple vs Advanced output mode):
-
-```bash
-.\.venv\Scripts\python.exe subtitle.py --watch --serve
-```
-
-`--serve` matters more than it looks. Opening `clip.html` from `file://`
-requires enabling Yomitan's *Allow access to file URLs*, and serving it through
-`python -m http.server` **silently breaks video seeking**, because that server
-ignores HTTP Range requests. `--serve` runs a range-capable server, so scrubbing
-works and Yomitan needs no extra permission.
-
-### Anki cards
-
-```bash
-.\.venv\Scripts\python.exe subtitle.py clip.mp4 --anki
-```
-
-Produces `clip.anki.tsv` (one row per sentence) plus a media folder of
-per-sentence audio clips, with columns: sentence, translation, `[sound:…]`,
-`<img>`, source file, timestamp. Copy the media into your Anki
-`collection.media` and import the TSV.
-
-This is the batch path. If you mine word-by-word with Yomitan, use `clip.html`
-instead and let Yomitan build the cards — it captures the sentence context on
-its own, which is usually what you want.
-
-Screenshots need Pillow (`pip install pillow`); without it the image column is
-left empty and everything else still works.
-
-**Two things about `--anki-translate`.** First, `large-v3-turbo` is a
-transcription-only fine-tune and *cannot translate* — asked to, it silently
-returns the source language. Translation is therefore routed to `small` unless
-you set `--translate-model`. Second, Whisper's Finnish→English is genuinely
-weak: it rendered *"sen verran syrjäisillä seuduilla"* as "the lake of Sennvera".
-For learning, Yomitan's dictionary lookups are far more trustworthy than a
-machine-translated card back.
-
-## Speed, honestly
-
-Measured on a 16-core CPU, no CUDA, `int8`, on real Finnish speech:
-
-| model | RTF | verdict |
-|---|---|---|
-| `tiny` | 0.07 | fast, poor Finnish |
-| `base` | 0.10 | fast, weak Finnish |
-| **`small`** (live default) | **0.57** | the practical ceiling on CPU |
-| `large-v3-turbo` (replay default) | 1.77 | too slow live, ideal offline |
-
-RTF is measured over a whole file. **Per segment during a live stream it is
-worse** — short utterances pay a fixed encoder cost, so real sessions show 0.55
-to 1.4, occasionally decoding slower than real time. Expect captions **3–8 s
-behind the speaker**, not 1 s. That is inherent to the approach, not a bug.
-
-Benchmark your own machine:
-
-```bash
-.\.venv\Scripts\python.exe bench.py --models small,medium
-```
-
-Synthetic audio flatters models because there are fewer tokens to decode. Point
-it at a real recording for a number you can trust:
-
-```bash
-.\.venv\Scripts\python.exe bench.py --wav selftest.wav
-```
-
-### Why it is not truly real-time
-
-Whisper is an offline encoder-decoder over fixed 30-second windows. It cannot
-emit a word until it has a chunk to process, so this waits for a pause and
-transcribes the finished utterance. That is chunked pseudo-streaming, not
-streaming ASR.
-
-Engines that genuinely stream — Kaldi/Vosk online decoding, sherpa-onnx
-Zipformer transducers — emit ~200–500 ms after the sound. Vosk covers Russian,
-Japanese, Spanish and Portuguese, **but has no Finnish model**. Nothing
-genuinely streaming covers this language set; Whisper covers all of it and is
-not streaming.
-
-`--stream` implements LocalAgreement streaming (Macháček et al.): re-decode a
-growing buffer, commit only the prefix two consecutive decodes agree on. It is
-**off by default because it measured worse here on both axes**, on the same
-17.6 s Finnish clip:
-
-| mode | speed | output |
-|---|---|---|
-| chunked `small` | 0.57× | *"Nyt ollaan taas sen verran syrjäisillä seuduilla ja harvakseltaan kuljetuilla seuduilla."* |
-| `--stream small` | 3.58× | too slow to run |
-| `--stream base` | 0.96× | *"Tolaan taas sen verran Syrjää Näissä ei sillä seudulla…"* |
-| `--stream tiny` | 0.34× | *"Kösitäästä. Ja tolaa on… parvaksiautaa"* |
-
-The models fast enough to stream are too weak for Finnish; the model good
-enough for Finnish is 3.6× too slow. **With a CUDA GPU this inverts** — run
-`--stream --compute-device cuda --compute float16 --model large-v3` and
-LocalAgreement becomes the better mode.
-
-To reduce latency without it, shorten the silence needed to close a caption and
-free up CPU:
-
-```bash
-.\run.ps1 --pause 0.4 --no-partials
-```
-
-### Better Finnish at the same speed
-
-Stock `small` is a generalist. A Finnish-fine-tuned `small` is the same size, so
-the same speed, but markedly better at Finnish:
-
-```bash
-.\get-finnish-model.ps1
-```
-
-Once built, `run.ps1` picks it up automatically whenever `--lang fi` and no
-`--model` is given. `--model small` overrides it; other languages ignore it.
-
-Measured on the same 17.6 s Finnish clip:
-
-| model | transcription | RTF |
-|---|---|---|
-| `small` stock | "harv**o**kseltaan kuljetuilla" ✗ | 0.20 |
-| **`fi-small-ct2`** | "harv**a**kseltaan kuljetuilla" ✓ | **0.21** |
-| `large-v3-turbo` | "harvakseltaan kuljetuilla" ✓ | 0.57 |
-
-Turbo-level accuracy at stock-`small` speed — 2.7× faster than turbo for the
-same correct word. That is why it is the live default when present.
-
-**Keep turbo for replay clips, though.** The fine-tune punctuates less
-reliably, running sentences together, and the offline path splits cues on
-sentence boundaries — so turbo yields cleaner subtitle cues and better Anki
-card boundaries. Live, the VAD does the segmenting, so this costs nothing.
-
-The conversion needs ~8 GB free and pulls torch, used only for that one step.
-`-BuildRoot D:\somewhere` builds elsewhere; delete `.venv-convert` under the
-build root afterwards to reclaim about 5 GB.
-
-## Syncing captions to the picture
-
-The overlay is composited before any stream delay or replay buffer, so captions
-ride along with the video automatically.
-
-To line captions up with lips, delay the picture by the caption latency:
-
-- **Render Delay** filter of `2500`–`4000` ms on video sources
-- matching **Sync Offset** on audio sources (Advanced Audio Properties)
-
-If you already run a replay buffer, this costs you nothing.
-
-## Options
-
-`livecap.py`:
-
-| flag | default | effect |
-|---|---|---|
-| `--lang` / `--langs` | `fi` / `fi,ru,ja,es,pt,en,auto` | active language, and the panel's buttons |
-| `--model` | `small`, or the Finnish fine-tune if built | model name or local CTranslate2 directory |
-| `--mic` / `--audio-device` | loopback / auto | capture an input device instead |
-| `--pause` | `0.65` | silence that closes a caption; lower is snappier |
-| `--min-speech` | `0.45` | ignore bursts shorter than this |
-| `--vad-floor` / `--vad-ratio` | `0.004` / `3.0` | speech gate, absolute and relative |
-| `--no-partials` | off | finished sentences only; roughly halves CPU |
-| `--stream` | off | LocalAgreement streaming (see above) |
-| `--translate` | off | add an English line |
-| `--compute-device` | `cpu` | `cuda` with an NVIDIA GPU |
-
-`subtitle.py`:
-
-| flag | default | effect |
-|---|---|---|
-| `--model` | `large-v3-turbo` | accuracy over speed |
-| `--watch FOLDER` | — | subtitle clips as they appear |
-| `--serve [PORT]` | — | range-capable server so seeking works |
-| `--anki` / `--anki-translate` | off | card export, with English backs |
-| `--format` | `srt` | `srt`, `vtt`, `txt` |
-| `--width` / `--max-chars` | `42` / `84` | line and cue length |
-
-## Diagnostics
-
-```bash
-.\run.ps1 --selftest 12
-```
-
-Records 12 s, writes `selftest.wav`, transcribes it and reports the real-time
-factor. Run this first.
-
-```bash
-.\run.ps1 --meter
-```
-
-Level meter with the VAD gate, for tuning `--vad-floor`. `--verbose` logs every
-segment the VAD sends.
-
-| symptom | cause |
-|---|---|
-| `no speech recognised in N.Ns segment` | music/noise, or wrong `--lang` |
-| nothing in the log at all | VAD never fires — check `--meter` and device |
-| `backlog full` | model too slow; use a smaller one |
-| video will not seek | server ignoring Range requests — use `--serve` |
-| red dot in overlay/reader | lost the WebSocket; it retries automatically |
-
-Whisper hallucinates stock phrases over silence (`Tekstitys: YLE`,
-`Kiitos kun katsoit!`, `Thanks for watching`). Short results matching those are
-filtered, alongside a no-speech-probability threshold.
-
-## Tests
-
-```bash
-.\.venv\Scripts\python.exe tests\test_smoke.py
+.\start.ps1 -Lang ja
 ```
 
 ```bash
-.\.venv\Scripts\python.exe tests\test_subtitle.py
+.\run.ps1 --langs fi,ru,ja,es,pt,en --lang auto
 ```
 
-## License
+## What it won't do
 
-MIT — see [LICENSE](LICENSE). Uses
-[faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT) and OpenAI's
-Whisper models. Streaming mode follows the LocalAgreement policy from
-Macháček, Dabre & Bojar, *Turning Whisper into Real-Time Transcription System*
-(2023).
+**It runs about 3–8 seconds behind.** Whisper is not a streaming model — it
+can't emit a word until it has a chunk to process, so this waits for a pause
+and transcribes the finished sentence. Genuinely streaming engines exist, but
+none of them cover this language set. If you need lip-sync, delay your video
+by the same amount; against a replay buffer that costs nothing.
+
+**It wants CPU.** No GPU required, and `small` holds real time on 16 cores —
+but Japanese is tighter than European languages. With a CUDA GPU, everything
+here gets better and `--stream` becomes viable.
+
+**It will occasionally invent a sentence.** Whisper hallucinates over silence.
+The common stock phrases are filtered, in every language it supports.
+
+---
+
+Full options, tuning, benchmarks and the reasoning behind them:
+**[docs/reference.md](docs/reference.md)**
+
+MIT. Built on [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
