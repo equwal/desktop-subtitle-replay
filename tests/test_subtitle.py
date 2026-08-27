@@ -61,6 +61,37 @@ def test_wrap_single_word_cannot_split():
     assert "\n" not in subtitle.wrap("Rindfleischetikettierungsgesetz", 5)
 
 
+def test_wrap_japanese_has_no_spaces_to_split_on():
+    text = "今日はとてもいい天気ですね。散歩に行きましょうか。"
+    out = subtitle.wrap(text, 16)
+    lines = out.split("\n")
+    assert len(lines) == 2, out
+    assert max(len(x) for x in lines) <= 16, out
+    assert "".join(lines) == text
+
+
+def test_wrap_japanese_prefers_breaking_after_punctuation():
+    text = "今日はいい天気。散歩に行こう。"
+    out = subtitle.wrap(text, 10)
+    assert out.split("\n")[0].endswith("。"), out
+
+
+def test_wrap_japanese_never_starts_a_line_with_closing_marks():
+    for text in ["これはテストです、そしてこれも試験です。",
+                 "彼は「そうだね」と言ったのでした。",
+                 "ちょっとまってっていったよね。"]:
+        out = subtitle.wrap(text, 10)
+        for line in out.split("\n")[1:]:
+            assert line[0] not in subtitle.NO_LINE_START, (text, out)
+
+
+def test_looks_cjk():
+    assert subtitle.looks_cjk("今日は")
+    assert subtitle.looks_cjk("テスト")
+    assert not subtitle.looks_cjk("Kyllä se tästä")
+    assert not subtitle.looks_cjk("Привет")
+
+
 def test_sentences_split_on_terminators():
     ws = words("Yksi kaksi.") + words("Kolme nelja.", t0=2.0)
     groups = subtitle.group_sentences(ws, max_dur=6.0, max_gap=0.8)

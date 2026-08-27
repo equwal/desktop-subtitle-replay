@@ -51,6 +51,42 @@ def ts(seconds, sep=","):
     return "%02d:%02d:%02d%s%03d" % (h, m, s, sep, ms)
 
 
+# Characters that may not begin a line (kinsoku shori). Closing punctuation,
+# small kana and the long-vowel mark all cling to what precedes them.
+NO_LINE_START = "、。！？…」』）】〉》・ゃゅょっぁぃぅぇぉーヵヶャュョッァィゥェォ,.!?:;"
+NO_LINE_END = "「『（【〈《"
+
+
+def looks_cjk(text):
+    return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿"
+               or "＀" <= c <= "￯" for c in text)
+
+
+def wrap_cjk(text, width):
+    """Break Japanese/Chinese text, which has no spaces to split on."""
+    if len(text) <= width:
+        return text
+    mid = len(text) / 2
+    best = None
+    for i in range(1, len(text)):
+        if text[i] in NO_LINE_START or text[i - 1] in NO_LINE_END:
+            continue
+        if max(i, len(text) - i) > width:
+            continue
+        score = abs(i - mid)
+        # Prefer breaking straight after sentence punctuation.
+        if text[i - 1] in "、。！？":
+            score -= width / 2
+        if best is None or score < best[0]:
+            best = (score, i)
+    if best is None:
+        i = max(1, min(len(text) - 1, int(mid)))
+        while i < len(text) - 1 and text[i] in NO_LINE_START:
+            i += 1
+        return text[:i] + "\n" + text[i:]
+    return text[:best[1]] + "\n" + text[best[1]:]
+
+
 def wrap(text, width):
     """Split into at most two balanced lines, the way subtitles are normally set."""
     text = " ".join(text.split())
@@ -58,7 +94,10 @@ def wrap(text, width):
         return text
     words = text.split()
     if len(words) < 2:
-        return text
+        return wrap_cjk(text, width) if looks_cjk(text) else text
+    if looks_cjk(text) and len(words) < len(text) / 8:
+        # Mostly CJK with a stray space or two: character breaking reads better.
+        return wrap_cjk(text, width)
 
     fits, over = None, None
     for i in range(1, len(words)):

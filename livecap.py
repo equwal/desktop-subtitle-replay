@@ -46,14 +46,30 @@ BLOCK_MS = 32
 
 # Whisper invents these when fed silence or noise. Only applied to short results.
 HALLUCINATIONS = [
+    # Finnish
     r"^tekstitys",
     r"^tekstityksen tuotti",
     r"^k[aa]a?nn[oo]s",
     r"^kiitos( kun katsoit| paljon| katsomisesta)?[.!]?$",
     r"^suomennos",
+    # Japanese - Whisper emits these constantly over silence
+    r"ご(視聴|清聴)(いただき)?ありがとうございま",
+    r"チャンネル登録",
+    r"^字幕",
+    r"^おわり[。]?$",
+    r"^(お|ご)?しまい[。]?$",
+    r"^ありがとうございま(した|す)[。]?$",
+    r"^(えー|あー|ん|う)+[ー。]?$",
+    # Russian
+    r"^субтитры",
+    r"^спасибо за просмотр",
+    r"^продолжение следует",
+    r"^редактор субтитров",
+    # English / generic
     r"^subtitles? by",
     r"^amara\.org",
     r"^thanks? for watching",
+    r"^please subscribe",
     r"^\W*$",
 ]
 HALLUCINATION_RE = [re.compile(p, re.I) for p in HALLUCINATIONS]
